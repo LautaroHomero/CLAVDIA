@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Secretario Médico · Agente con aprobación humana",
+  title: "CLAVDIA Secretario Médico · Agente con aprobación humana",
   description:
     "Agente de secretaría médica (DurableAgent + Workflow DevKit) con pasos human-in-the-loop por Slack.",
 };

@@ -92,7 +92,7 @@ export function ChatApp({ actor }: { actor: Actor }) {
       <section className="flex min-h-[65vh] flex-1 flex-col overflow-hidden rounded-xl border border-hairline bg-surface shadow-card md:min-h-0">
         <header className="flex items-center justify-between border-b border-hairline px-5 py-3.5">
           <div className="space-y-0.5">
-            <h1 className="text-[15px] font-semibold tracking-tight text-ink">CLAVDOA Secretario médico</h1>
+            <h1 className="text-[15px] font-semibold tracking-tight text-ink">CLAVDIA Secretario médico</h1>
             <p className="text-[12px] text-muted">
               {actor.name}
               {actor.specialty ? ` · ${actor.specialty}` : ` · ${ROLE_LABEL[actor.role]}`}

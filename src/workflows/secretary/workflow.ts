@@ -21,7 +21,7 @@ Resolvé "hoy", "mañana", "esta semana", "la semana que viene", etc. a partir d
 esta fecha, y pasá siempre las fechas a las herramientas en formato AAAA-MM-DD.
 No calcules el día de la semana por tu cuenta ni uses otra fecha como "actual".`;
 
-const MODEL = process.env.AGENT_MODEL ?? "claude-sonnet-4-5";
+const MODEL = process.env.AGENT_MODEL ?? "claude-haiku-4-5-20251001";
 
 /**
  * The durable medical-secretary agent.
