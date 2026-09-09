@@ -70,6 +70,8 @@ function toAppointment(r: Row): Appointment {
     reason: r.reason as string,
     status: r.status as Appointment["status"],
     price: (r.price as number) ?? 0,
+    actualStart: (r.actual_start as string) ?? undefined,
+    actualEnd: (r.actual_end as string) ?? undefined,
     createdVia: r.created_via as Appointment["createdVia"],
   };
 }
@@ -324,18 +326,38 @@ export function getUpcomingAppointments(patientId: string): Appointment[] {
   );
 }
 
-/** Agenda view: scheduled appointments, optionally filtered by provider / date. */
+/** Agenda view: upcoming + in-progress appointments, optionally filtered. */
 export function listAppointments(opts: { providerId?: string; date?: string } = {}): Appointment[] {
   const rows = getDb()
     .prepare(
       `SELECT * FROM appointments
-       WHERE status = 'scheduled'
+       WHERE status IN ('scheduled', 'in-progress')
          AND (@providerId IS NULL OR provider_id = @providerId)
          AND (@date IS NULL OR substr(start, 1, 10) = @date)
        ORDER BY start`,
     )
     .all({ providerId: opts.providerId ?? null, date: opts.date ?? null }) as Row[];
   return rows.map(toAppointment);
+}
+
+/** The appointment a provider is currently in, if any. */
+export function inProgressAppointment(providerId: string, date: string): Appointment | undefined {
+  const r = getDb()
+    .prepare(
+      "SELECT * FROM appointments WHERE provider_id = ? AND substr(start,1,10) = ? AND status = 'in-progress' LIMIT 1",
+    )
+    .get(providerId, date) as Row | undefined;
+  return r ? toAppointment(r) : undefined;
+}
+
+/** The provider's next not-yet-started appointment for a day. */
+export function nextScheduledAppointment(providerId: string, date: string): Appointment | undefined {
+  const r = getDb()
+    .prepare(
+      "SELECT * FROM appointments WHERE provider_id = ? AND substr(start,1,10) = ? AND status = 'scheduled' ORDER BY start LIMIT 1",
+    )
+    .get(providerId, date) as Row | undefined;
+  return r ? toAppointment(r) : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -592,4 +614,213 @@ export function getSavedDailyReport(
     generatedBy: (r.generated_by as string) ?? undefined,
     payload: JSON.parse(r.payload as string),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Live agenda: running clock, start/finish a visit, delay notices
+// ---------------------------------------------------------------------------
+
+const hm = (iso: string) => iso.slice(11, 16);
+const dayOf = (iso: string) => iso.slice(0, 10);
+
+function minutesBetween(a: string, b: string): number {
+  return (Date.parse(b.replace(" ", "T")) - Date.parse(a.replace(" ", "T"))) / 60000;
+}
+function addMinutes(iso: string, min: number): string {
+  const d = new Date(iso.replace(" ", "T"));
+  d.setMinutes(d.getMinutes() + Math.round(min));
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:00`;
+}
+
+export function isBirthday(patientId: string, date: string): boolean {
+  const p = getPatient(patientId);
+  return Boolean(p && p.dateOfBirth.slice(5) === date.slice(5));
+}
+
+function initialClock(providerId: string, date: string): string {
+  const r = getDb()
+    .prepare(
+      `SELECT start FROM appointments
+       WHERE provider_id = ? AND substr(start,1,10) = ? AND status IN ('scheduled','in-progress')
+       ORDER BY start LIMIT 1`,
+    )
+    .get(providerId, date) as { start?: string } | undefined;
+  return r?.start ?? `${date}T09:00:00`;
+}
+
+export function getClinicClock(providerId: string, date: string): string {
+  const r = getDb()
+    .prepare("SELECT clock FROM clinic_state WHERE date = ? AND provider_id = ?")
+    .get(date, providerId) as { clock?: string } | undefined;
+  if (r?.clock) return r.clock;
+  const c = initialClock(providerId, date);
+  getDb()
+    .prepare("INSERT OR REPLACE INTO clinic_state (date, provider_id, clock) VALUES (?, ?, ?)")
+    .run(date, providerId, c);
+  return c;
+}
+
+export function setClinicClock(providerId: string, date: string, iso: string): void {
+  getDb()
+    .prepare("INSERT OR REPLACE INTO clinic_state (date, provider_id, clock) VALUES (?, ?, ?)")
+    .run(date, providerId, iso);
+}
+
+export interface AgendaEntry {
+  appointmentId: string;
+  patientId: string;
+  patientName: string;
+  reason: string;
+  status: Appointment["status"];
+  scheduled: string; // HH:MM
+  estimated: string; // HH:MM
+  delayMinutes: number;
+  isBirthday: boolean;
+}
+
+export interface ProviderAgenda {
+  providerId: string;
+  providerName: string;
+  date: string;
+  clock: string; // HH:MM
+  running: "en horario" | "atrasada" | "adelantada";
+  offsetMinutes: number; // + = atrasada
+  inAttention?: AgendaEntry;
+  next?: AgendaEntry;
+  upcoming: AgendaEntry[];
+  attendedToday: number;
+}
+
+export function providerAgenda(providerId: string, date: string): ProviderAgenda {
+  const clock = getClinicClock(providerId, date);
+  const appts = (
+    getDb()
+      .prepare("SELECT * FROM appointments WHERE provider_id = ? AND substr(start,1,10) = ? ORDER BY start")
+      .all(providerId, date) as Row[]
+  ).map(toAppointment);
+
+  const active = appts.find((a) => a.status === "in-progress");
+  const pending = appts.filter((a) => a.status === "scheduled");
+  const ref = active ?? pending[0];
+  const offset = ref ? Math.round(minutesBetween(ref.start, clock)) : 0;
+  const late = Math.max(0, offset);
+
+  const entry = (a: Appointment): AgendaEntry => {
+    const est = addMinutes(a.start, late);
+    return {
+      appointmentId: a.id,
+      patientId: a.patientId,
+      patientName: getPatient(a.patientId)?.fullName ?? a.patientId,
+      reason: a.reason,
+      status: a.status,
+      scheduled: hm(a.start),
+      estimated: hm(est),
+      delayMinutes: Math.round(minutesBetween(a.start, est)),
+      isBirthday: isBirthday(a.patientId, date),
+    };
+  };
+
+  return {
+    providerId,
+    providerName: getProvider(providerId)?.name ?? providerId,
+    date,
+    clock: hm(clock),
+    running: offset > 5 ? "atrasada" : offset < -5 ? "adelantada" : "en horario",
+    offsetMinutes: offset,
+    inAttention: active ? entry(active) : undefined,
+    next: pending[0] ? entry(pending[0]) : undefined,
+    upcoming: pending.slice(1).map(entry),
+    attendedToday: appts.filter((a) => a.status === "completed").length,
+  };
+}
+
+export function startAttention(appointmentId: string): Appointment {
+  const a = getAppointment(appointmentId);
+  if (!a) throw new Error(`El turno ${appointmentId} no existe.`);
+  if (a.status !== "scheduled") throw new Error(`El turno está ${a.status}, no se puede iniciar.`);
+  const date = dayOf(a.start);
+  const clock = getClinicClock(a.providerId, date);
+  getDb()
+    .prepare("UPDATE appointments SET status = 'in-progress', actual_start = ? WHERE id = ?")
+    .run(clock, appointmentId);
+  return getAppointment(appointmentId)!;
+}
+
+export function finishAttention(appointmentId: string, actualMinutes?: number): Appointment {
+  const a = getAppointment(appointmentId);
+  if (!a) throw new Error(`El turno ${appointmentId} no existe.`);
+  const date = dayOf(a.start);
+  const startedAt = a.actualStart ?? getClinicClock(a.providerId, date);
+  const dur = Math.max(1, Math.round(actualMinutes ?? a.durationMinutes));
+  const endAt = addMinutes(startedAt, dur);
+  getDb()
+    .prepare(
+      "UPDATE appointments SET status = 'completed', actual_end = ?, actual_start = COALESCE(actual_start, ?) WHERE id = ?",
+    )
+    .run(endAt, startedAt, appointmentId);
+  setClinicClock(a.providerId, date, endAt);
+  return getAppointment(appointmentId)!;
+}
+
+export function patientAppointmentToday(patientId: string, date: string): Appointment | undefined {
+  const r = getDb()
+    .prepare(
+      `SELECT * FROM appointments
+       WHERE patient_id = ? AND substr(start,1,10) = ? AND status IN ('scheduled','in-progress')
+       ORDER BY start LIMIT 1`,
+    )
+    .get(patientId, date) as Row | undefined;
+  return r ? toAppointment(r) : undefined;
+}
+
+export function replacePatientNotice(
+  appointmentId: string,
+  patientId: string,
+  date: string,
+  message: string,
+): void {
+  const db = getDb();
+  db.prepare("UPDATE patient_notices SET resolved = 1 WHERE appointment_id = ? AND resolved = 0").run(
+    appointmentId,
+  );
+  db.prepare(
+    "INSERT INTO patient_notices (id, appointment_id, patient_id, date, created_at, message, resolved) VALUES (?, ?, ?, ?, ?, ?, 0)",
+  ).run(`ntc_${randomUUID().slice(0, 8)}`, appointmentId, patientId, date, new Date().toISOString(), message);
+}
+
+export function listPatientNotices(
+  patientId: string,
+  date: string,
+): { id: string; message: string; createdAt: string }[] {
+  return (
+    getDb()
+      .prepare(
+        "SELECT id, message, created_at FROM patient_notices WHERE patient_id = ? AND date = ? AND resolved = 0 ORDER BY created_at",
+      )
+      .all(patientId, date) as Row[]
+  ).map((r) => ({ id: r.id as string, message: r.message as string, createdAt: r.created_at as string }));
+}
+
+export function resolvePatientNotice(id: string): void {
+  getDb().prepare("UPDATE patient_notices SET resolved = 1 WHERE id = ?").run(id);
+}
+
+/** An open slot for this provider today, after the clock and before `beforeHm`. */
+export function earlierOpeningToday(
+  providerId: string,
+  date: string,
+  beforeHm: string,
+): { slotId: string; time: string } | undefined {
+  const clockHm = hm(getClinicClock(providerId, date));
+  const rows = getDb()
+    .prepare(
+      "SELECT id, start FROM slots WHERE provider_id = ? AND taken = 0 AND substr(start,1,10) = ? ORDER BY start",
+    )
+    .all(providerId, date) as Row[];
+  for (const r of rows) {
+    const t = (r.start as string).slice(11, 16);
+    if (t >= clockHm && t < beforeHm) return { slotId: r.id as string, time: t };
+  }
+  return undefined;
 }

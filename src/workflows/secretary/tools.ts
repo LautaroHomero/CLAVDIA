@@ -7,7 +7,11 @@ import {
   createPatient,
   createPrescriptionRequest,
   createProfessional,
+  earlierOpeningToday,
+  finishAttention,
   getAppointment,
+  inProgressAppointment,
+  nextScheduledAppointment,
   getInvoicesForPatient,
   getLabResultsForPatient,
   getPatient,
@@ -17,17 +21,23 @@ import {
   getSlot,
   listAppointments,
   listOpenSlots,
+  listPatientNotices,
   listProviderPrices,
   listProviders,
+  patientAppointmentToday,
   priceForReason,
+  providerAgenda,
   providerNameTaken,
   recordPatientMessage,
   refundInvoice as refundInvoiceInDb,
+  replacePatientNotice,
+  resolvePatientNotice,
   saveDailyReport,
   searchPatients,
   setAppointmentPrice,
   setAppointmentStatus,
   setProviderFee,
+  startAttention,
   userNameTaken,
 } from "@/lib/db/repo";
 import { buildPatientBriefing } from "@/lib/domain/briefing";
@@ -516,6 +526,210 @@ async function closeDayStep({ date }: { date?: string }, ctx: ToolCtx) {
 }
 
 // ---------------------------------------------------------------------------
+// Live agenda (running late / ahead, pre-visit briefing, patient notices)
+// ---------------------------------------------------------------------------
+
+/** After a visit starts/ends, refresh the delay notice for every waiting patient. */
+function refreshWaitingNotices(providerId: string): { patient: string; message: string }[] {
+  const agenda = providerAgenda(providerId, DEMO_TODAY);
+  const out: { patient: string; message: string }[] = [];
+  for (const e of [...(agenda.next ? [agenda.next] : []), ...agenda.upcoming]) {
+    let msg: string | null = null;
+    if (e.delayMinutes >= 10) {
+      const earlier = earlierOpeningToday(providerId, DEMO_TODAY, e.estimated);
+      msg =
+        `Se demoró un turno anterior. Tu cita de las ${e.scheduled} se estima ahora ~${e.estimated} ` +
+        `(la agenda va +${e.delayMinutes} min). Si te queda mejor, podés venir más tarde` +
+        (earlier ? `, o adelantarte: hay lugar ${earlier.time}.` : ".");
+    } else if (agenda.running === "adelantada") {
+      const earlier = earlierOpeningToday(providerId, DEMO_TODAY, e.scheduled);
+      if (earlier)
+        msg = `El profesional va adelantado. Si podés venir antes de las ${e.scheduled}, hay lugar ${earlier.time}.`;
+    }
+    if (msg) {
+      replacePatientNotice(e.appointmentId, e.patientId, DEMO_TODAY, msg);
+      out.push({ patient: e.patientName, message: msg });
+    }
+  }
+  return out;
+}
+
+async function nextPatientStep(_input: unknown, ctx: ToolCtx) {
+  "use step";
+  const actor = actorOf(ctx);
+  const providerId = actor?.role === "medico" ? actor.providerId : undefined;
+  if (!providerId) return { ok: false, error: "Esta herramienta es para el profesional." };
+
+  const agenda = providerAgenda(providerId, DEMO_TODAY);
+  const target = agenda.inAttention ?? agenda.next;
+  if (!target) {
+    return { ok: true, message: "No quedan pacientes en la agenda de hoy.", agenda: agendaSummary(agenda) };
+  }
+  const briefing = buildPatientBriefing(target.patientId);
+  return {
+    ok: true,
+    estado: agenda.inAttention ? "en atención" : "próximo",
+    turno: {
+      appointmentId: target.appointmentId,
+      paciente: target.patientName,
+      motivo: target.reason,
+      programado: target.scheduled,
+      estimado: target.estimated,
+      cumpleAniosHoy: target.isBirthday,
+    },
+    resumenPaciente: briefing.summary,
+    agenda: agendaSummary(agenda),
+  };
+}
+
+function agendaSummary(a: ReturnType<typeof providerAgenda>) {
+  return {
+    reloj: a.clock,
+    marcha: a.running,
+    desfasajeMin: a.offsetMinutes,
+    atendidosHoy: a.attendedToday,
+    enEspera: [...(a.next ? [a.next] : []), ...a.upcoming].map(
+      (e) => `${e.scheduled}→~${e.estimated} ${e.patientName} (${e.reason})`,
+    ),
+  };
+}
+
+async function startAttentionStep({ appointmentId }: { appointmentId?: string }, ctx: ToolCtx) {
+  "use step";
+  const actor = actorOf(ctx);
+  const provId = actor?.role === "medico" ? actor.providerId : undefined;
+  const a = appointmentId
+    ? getAppointment(appointmentId)
+    : provId
+      ? nextScheduledAppointment(provId, DEMO_TODAY)
+      : undefined;
+  if (!a) return { ok: false, error: "No encontré el turno a iniciar." };
+  appointmentId = a.id;
+  if (actor?.role === "medico" && actor.providerId && a.providerId !== actor.providerId) {
+    return { ok: false, error: "Ese turno no es de tu agenda." };
+  }
+  try {
+    const started = startAttention(appointmentId);
+    const notified = refreshWaitingNotices(a.providerId);
+    const agenda = providerAgenda(a.providerId, DEMO_TODAY);
+    return {
+      ok: true,
+      enAtencion: getPatient(started.patientId)?.fullName,
+      agenda: agendaSummary(agenda),
+      avisosEnviados: notified,
+    };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+async function finishAttentionStep(
+  { appointmentId, actualMinutes, note }: { appointmentId?: string; actualMinutes?: number; note?: string },
+  ctx: ToolCtx,
+) {
+  "use step";
+  const actor = actorOf(ctx);
+  const provId = actor?.role === "medico" ? actor.providerId : undefined;
+  const a = appointmentId
+    ? getAppointment(appointmentId)
+    : provId
+      ? inProgressAppointment(provId, DEMO_TODAY)
+      : undefined;
+  if (!a) return { ok: false, error: "No hay ninguna atención en curso para cerrar." };
+  appointmentId = a.id;
+  if (actor?.role === "medico" && actor.providerId && a.providerId !== actor.providerId) {
+    return { ok: false, error: "Ese turno no es de tu agenda." };
+  }
+  void note;
+  try {
+    finishAttention(appointmentId, actualMinutes);
+    const notified = refreshWaitingNotices(a.providerId);
+    const agenda = providerAgenda(a.providerId, DEMO_TODAY);
+    return {
+      ok: true,
+      cerrado: getPatient(a.patientId)?.fullName,
+      duracionMin: actualMinutes ?? a.durationMinutes,
+      agenda: agendaSummary(agenda),
+      proximo: agenda.next
+        ? `${agenda.next.patientName} — programado ${agenda.next.scheduled}, estimado ~${agenda.next.estimated}`
+        : "no quedan turnos",
+      avisosEnviados: notified,
+    };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+async function myVisitStatusStep(_input: unknown, ctx: ToolCtx) {
+  "use step";
+  const actor = actorOf(ctx);
+  if (actor?.role !== "paciente" || !actor.patientId) {
+    return { ok: false, error: "Esta herramienta es para el paciente." };
+  }
+  const appt = patientAppointmentToday(actor.patientId, DEMO_TODAY);
+  const notices = listPatientNotices(actor.patientId, DEMO_TODAY).map((n) => n.message);
+  if (!appt) {
+    return { ok: true, tenesTurnoHoy: false, avisos: notices };
+  }
+  const agenda = providerAgenda(appt.providerId, DEMO_TODAY);
+  const entry =
+    [agenda.inAttention, agenda.next, ...agenda.upcoming].find((e) => e?.appointmentId === appt.id) ?? null;
+  const earlier = entry ? earlierOpeningToday(appt.providerId, DEMO_TODAY, entry.estimated) : undefined;
+  return {
+    ok: true,
+    tenesTurnoHoy: true,
+    profesional: agenda.providerName,
+    motivo: appt.reason,
+    programado: entry?.scheduled,
+    estimadoAhora: entry?.estimated,
+    demoraMin: entry?.delayMinutes ?? 0,
+    marchaAgenda: agenda.running,
+    hayLugarAntes: earlier ? earlier.time : null,
+    avisos: notices,
+  };
+}
+
+async function changeMyVisitTimeStep(
+  { direction }: { direction: "later" | "earlier" },
+  ctx: ToolCtx,
+) {
+  "use step";
+  const actor = actorOf(ctx);
+  if (actor?.role !== "paciente" || !actor.patientId) {
+    return { ok: false, error: "Esta herramienta es para el paciente." };
+  }
+  const appt = patientAppointmentToday(actor.patientId, DEMO_TODAY);
+  if (!appt) return { ok: false, error: "No tenés un turno hoy." };
+  const agenda = providerAgenda(appt.providerId, DEMO_TODAY);
+  const entry = [agenda.next, ...agenda.upcoming].find((e) => e?.appointmentId === appt.id) ?? null;
+
+  if (direction === "later") {
+    listPatientNotices(actor.patientId, DEMO_TODAY).forEach((n) => resolvePatientNotice(n.id));
+    return {
+      ok: true,
+      accion: "confirmado-mas-tarde",
+      mensaje: `Perfecto. Vení tranquilo/a, te esperamos alrededor de las ${entry?.estimated ?? entry?.scheduled}.`,
+    };
+  }
+
+  const opening = earlierOpeningToday(appt.providerId, DEMO_TODAY, entry?.estimated ?? entry?.scheduled ?? "23:59");
+  if (!opening) {
+    return { ok: true, accion: "sin-lugar-antes", mensaje: "Por ahora no hay lugar para adelantarte." };
+  }
+  cancelAppointmentById(appt.id);
+  const moved = bookSlot({ patientId: appt.patientId, slotId: opening.slotId, reason: appt.reason });
+  setAppointmentPrice(moved.id, appt.price || priceForReason(moved.providerId, appt.reason));
+  listPatientNotices(actor.patientId, DEMO_TODAY).forEach((n) => resolvePatientNotice(n.id));
+  return {
+    ok: true,
+    accion: "adelantado",
+    nuevoHorario: opening.time,
+    appointmentId: moved.id,
+    mensaje: `Listo, te adelantamos a las ${opening.time}.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Tool set
 // ---------------------------------------------------------------------------
 
@@ -704,6 +918,45 @@ export const secretaryTools = {
     execute: closeDayStep,
   },
 
+  getNextPatient: {
+    description:
+      "Para el PROFESIONAL: trae el paciente en atención o el próximo, con su resumen para hoy (incluye si cumple años), el horario programado vs. estimado, y cómo viene la agenda (en horario / atrasada / adelantada).",
+    inputSchema: z.object({}),
+    execute: nextPatientStep,
+  },
+
+  startAttention: {
+    description:
+      "Para el PROFESIONAL: registra que EMPEZÓ a atender a un paciente (su 'ok'). Si no pasás appointmentId, toma el próximo turno. Fija la hora real de inicio y avisa por su chat a los pacientes que siguen si la agenda se atrasó o adelantó.",
+    inputSchema: z.object({ appointmentId: z.string().optional() }),
+    execute: startAttentionStep,
+  },
+
+  finishAttention: {
+    description:
+      "Para el PROFESIONAL: registra que TERMINÓ de atender. Si no pasás appointmentId, cierra la atención en curso. Pasá `actualMinutes` si duró distinto a lo previsto (ej. hizo una práctica y tardó 50'). Recalcula la demora y reavisa a los que esperan; deja listo el resumen del siguiente.",
+    inputSchema: z.object({
+      appointmentId: z.string().optional(),
+      actualMinutes: z.number().optional().describe("Duración real en minutos"),
+      note: z.string().optional(),
+    }),
+    execute: finishAttentionStep,
+  },
+
+  getMyVisitStatus: {
+    description:
+      "Para el PACIENTE: estado de su turno de hoy — horario programado, estimado ahora, demora, cómo viene la agenda, si hay lugar para ir antes, y los avisos que le mandó el consultorio.",
+    inputSchema: z.object({}),
+    execute: myVisitStatusStep,
+  },
+
+  changeMyVisitTime: {
+    description:
+      "Para el PACIENTE: 'later' = confirma que viene más tarde por la demora (no reagenda, solo lo tranquiliza). 'earlier' = si hay un hueco antes con el mismo profesional hoy, adelanta el turno.",
+    inputSchema: z.object({ direction: z.enum(["later", "earlier"]) }),
+    execute: changeMyVisitTimeStep,
+  },
+
   requestHumanApproval: {
     description:
       "Pausa el flujo y pide APROBACIÓN a una persona (Slack y/o panel de la app). Devuelve { approved, note, respondedBy, timedOut }.",
@@ -796,6 +1049,9 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
     "findPatient",
     "listMyAgenda",
     "listPendingApprovals",
+    "getNextPatient",
+    "startAttention",
+    "finishAttention",
     "scheduleAppointment",
     "cancelAppointment",
     "rescheduleAppointment",
@@ -813,6 +1069,7 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
     "findPatient",
     "listMyAgenda",
     "registerProfessional",
+    "getNextPatient",
     "scheduleAppointment",
     "cancelAppointment",
     "rescheduleAppointment",
@@ -828,6 +1085,8 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
   ],
   paciente: [
     ...COMMON,
+    "getMyVisitStatus",
+    "changeMyVisitTime",
     "scheduleAppointment",
     "cancelAppointment",
     "rescheduleAppointment",

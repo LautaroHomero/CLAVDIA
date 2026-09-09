@@ -160,7 +160,12 @@ export function ChatApp({ actor }: { actor: Actor }) {
         </form>
       </section>
 
-      <ApprovalsPanel actor={actor} />
+      <div className="flex w-full flex-col gap-4 overflow-y-auto md:min-h-0 md:w-80">
+        {actor.role !== "recepcion" && (
+          <AgendaPanel actor={actor} onSend={(text) => sendMessage({ text })} />
+        )}
+        <ApprovalsPanel actor={actor} />
+      </div>
     </main>
   );
 }
@@ -310,6 +315,207 @@ function MessageBubble({ role, parts }: { role: string; parts: Part[] }) {
   );
 }
 
+const CARD = "flex w-full shrink-0 flex-col gap-3 rounded-xl border border-hairline bg-surface p-5 shadow-card";
+
+type AgendaData =
+  | {
+      role: "medico";
+      clock: string;
+      running: "en horario" | "atrasada" | "adelantada";
+      offsetMinutes: number;
+      attendedToday: number;
+      inAttention: { appointmentId: string; patientName: string; scheduled: string } | null;
+      next: {
+        appointmentId: string;
+        patientName: string;
+        reason: string;
+        scheduled: string;
+        estimated: string;
+        isBirthday: boolean;
+      } | null;
+      upcoming: { patientName: string; scheduled: string; estimated: string }[];
+      briefing: string | null;
+    }
+  | {
+      role: "paciente";
+      hasVisit: boolean;
+      provider?: string;
+      reason?: string;
+      scheduled?: string | null;
+      estimated?: string | null;
+      delayMinutes?: number;
+      running?: string;
+      earlierAt?: string | null;
+      inProgress?: boolean;
+      notices: string[];
+    }
+  | { role: "recepcion"; unsupported: true };
+
+function runningBadge(running: string, offset: number) {
+  if (running === "atrasada")
+    return { text: `+${offset} min`, cls: "bg-[#fbf1e3] text-[#9a6a1f]" };
+  if (running === "adelantada")
+    return { text: `${offset} min`, cls: "bg-[#e6f4ec] text-[#2e7d5b]" };
+  return { text: "en horario", cls: "bg-canvas text-muted" };
+}
+
+function AgendaPanel({ actor, onSend }: { actor: Actor; onSend: (t: string) => void }) {
+  const [data, setData] = useState<AgendaData | null>(null);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const r = await fetch("/api/agenda", { cache: "no-store" });
+        if (r.ok) setData(await r.json());
+      } catch {
+        /* ignore */
+      }
+    };
+    load();
+    const id = setInterval(load, 3000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!data) return null;
+
+  if (data.role === "medico") {
+    const badge = runningBadge(data.running, data.offsetMinutes);
+    return (
+      <aside className={CARD}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-[15px] font-semibold tracking-tight text-ink">Consultorio · ahora</h2>
+          <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${badge.cls}`}>
+            {data.clock} · {badge.text}
+          </span>
+        </div>
+
+        {data.inAttention ? (
+          <div className="space-y-2 rounded-lg border border-hairline p-3.5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">En atención</p>
+            <p className="text-[14px] font-semibold text-ink">{data.inAttention.patientName}</p>
+            <p className="text-[12px] text-muted">desde las {data.inAttention.scheduled}</p>
+            <button
+              onClick={() => onSend(`Terminé de atender a ${data.inAttention!.patientName} (${data.inAttention!.appointmentId}).`)}
+              className="w-full rounded-md bg-ink px-2 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-ink-hover"
+            >
+              Terminé
+            </button>
+            <p className="text-[11px] text-muted/80">
+              Si duró distinto, decímelo en el chat (“duró 50 minutos”).
+            </p>
+          </div>
+        ) : data.next ? (
+          <div className="space-y-2 rounded-lg border border-hairline p-3.5">
+            <div className="flex items-center justify-between">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Próximo</p>
+              {data.next.isBirthday && (
+                <span className="rounded-full bg-[#fbecec] px-2 py-0.5 text-[11px] font-semibold text-[#b23b3b]">
+                  🎂 cumple años
+                </span>
+              )}
+            </div>
+            <p className="text-[14px] font-semibold text-ink">{data.next.patientName}</p>
+            <p className="text-[12px] text-muted">
+              {data.next.reason} · {data.next.scheduled}
+              {data.next.estimated !== data.next.scheduled ? ` → ~${data.next.estimated}` : ""}
+            </p>
+            {data.briefing && (
+              <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-ink/80">
+                {data.briefing}
+              </p>
+            )}
+            <button
+              onClick={() => onSend(`Iniciá la atención de ${data.next!.patientName} (${data.next!.appointmentId}).`)}
+              className="w-full rounded-md bg-[#2e7d5b] px-2 py-2 text-[13px] font-semibold text-white transition-opacity hover:opacity-90"
+            >
+              Iniciar atención
+            </button>
+          </div>
+        ) : (
+          <p className="text-[13px] text-muted">No quedan pacientes en la agenda de hoy.</p>
+        )}
+
+        {data.upcoming.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">En espera</p>
+            {data.upcoming.map((u, i) => (
+              <p key={i} className="text-[12px] text-muted">
+                {u.scheduled}
+                {u.estimated !== u.scheduled ? ` → ~${u.estimated}` : ""} · {u.patientName}
+              </p>
+            ))}
+          </div>
+        )}
+      </aside>
+    );
+  }
+
+  if (data.role === "paciente") {
+    if (!data.hasVisit) {
+      return (
+        <aside className={CARD}>
+          <h2 className="text-[15px] font-semibold tracking-tight text-ink">Tu turno de hoy</h2>
+          <p className="text-[13px] text-muted">No tenés turno para hoy.</p>
+          {data.notices.map((n, i) => (
+            <p key={i} className="rounded-lg bg-canvas p-2.5 text-[12px] text-ink/80">{n}</p>
+          ))}
+        </aside>
+      );
+    }
+    const delayed = (data.delayMinutes ?? 0) >= 10;
+    return (
+      <aside className={CARD}>
+        <h2 className="text-[15px] font-semibold tracking-tight text-ink">Tu turno de hoy</h2>
+        <div className="rounded-lg border border-hairline p-3.5">
+          <p className="text-[22px] font-semibold text-ink">
+            {data.scheduled}
+            {data.estimated && data.estimated !== data.scheduled && (
+              <span className="text-muted"> → ~{data.estimated}</span>
+            )}
+          </p>
+          <p className="text-[12px] text-muted">
+            {data.provider} · {data.reason}
+          </p>
+          <p className="mt-1 text-[12px]">
+            {data.inProgress
+              ? "El profesional te va a llamar en breve."
+              : delayed
+                ? `La agenda va demorada (+${data.delayMinutes} min).`
+                : data.running === "adelantada"
+                  ? "El profesional va adelantado."
+                  : "En horario."}
+          </p>
+        </div>
+
+        {data.notices.map((n, i) => (
+          <p key={i} className="rounded-lg bg-canvas p-2.5 text-[12px] text-ink/80">{n}</p>
+        ))}
+
+        <div className="flex flex-wrap gap-2">
+          {delayed && (
+            <button
+              onClick={() => onSend("Gracias por avisar, voy a ir más tarde entonces.")}
+              className="rounded-md border border-hairline px-3 py-1.5 text-[12px] font-semibold text-ink hover:border-ink"
+            >
+              Voy más tarde
+            </button>
+          )}
+          {data.earlierAt && (
+            <button
+              onClick={() => onSend(`¿Puedo ir más temprano? Vi que hay lugar ${data.earlierAt}.`)}
+              className="rounded-md bg-ink px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-ink-hover"
+            >
+              Ir más temprano ({data.earlierAt})
+            </button>
+          )}
+        </div>
+      </aside>
+    );
+  }
+
+  return null;
+}
+
 function ApprovalsPanel({ actor }: { actor: Actor }) {
   const [data, setData] = useState<{ slackEnabled: boolean; pending: PendingHumanRequest[] }>({
     slackEnabled: false,
@@ -334,7 +540,7 @@ function ApprovalsPanel({ actor }: { actor: Actor }) {
   const readOnly = actor.role === "paciente";
 
   return (
-    <aside className="flex w-full flex-col gap-3 overflow-y-auto rounded-xl border border-hairline bg-surface p-5 shadow-card md:min-h-0 md:w-80">
+    <aside className="flex w-full shrink-0 flex-col gap-3 rounded-xl border border-hairline bg-surface p-5 shadow-card">
       <div className="flex items-center justify-between">
         <h2 className="text-[15px] font-semibold tracking-tight text-ink">{PANEL_TITLE[actor.role]}</h2>
         <span

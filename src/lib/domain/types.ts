@@ -47,7 +47,7 @@ export interface Medication {
   chronic: boolean;
 }
 
-export type AppointmentStatus = "scheduled" | "cancelled" | "completed";
+export type AppointmentStatus = "scheduled" | "in-progress" | "cancelled" | "completed";
 
 export interface Appointment {
   id: string;
@@ -58,6 +58,8 @@ export interface Appointment {
   reason: string;
   status: AppointmentStatus;
   price: number; // ARS, resolved at scheduling time
+  actualStart?: ISODateTime; // set when the professional starts the visit
+  actualEnd?: ISODateTime;
   createdVia: "agent" | "front-desk";
 }
 

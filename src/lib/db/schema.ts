@@ -53,9 +53,30 @@ CREATE TABLE IF NOT EXISTS appointments (
   start            TEXT NOT NULL,
   duration_minutes INTEGER NOT NULL,
   reason           TEXT NOT NULL,
-  status           TEXT NOT NULL DEFAULT 'scheduled', -- scheduled | completed | cancelled
+  status           TEXT NOT NULL DEFAULT 'scheduled', -- scheduled | in-progress | completed | cancelled
   price            INTEGER NOT NULL DEFAULT 0,
+  actual_start     TEXT,
+  actual_end       TEXT,
   created_via      TEXT NOT NULL DEFAULT 'front-desk'
+);
+
+-- Simulated "now" per professional per day, advanced as patients are seen.
+CREATE TABLE IF NOT EXISTS clinic_state (
+  date        TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  clock       TEXT NOT NULL,
+  PRIMARY KEY (date, provider_id)
+);
+
+-- Messages the agenda pushes to a patient's chat (delay / move-up offers).
+CREATE TABLE IF NOT EXISTS patient_notices (
+  id             TEXT PRIMARY KEY,
+  appointment_id TEXT NOT NULL REFERENCES appointments(id),
+  patient_id     TEXT NOT NULL REFERENCES patients(id),
+  date           TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  message        TEXT NOT NULL,
+  resolved       INTEGER NOT NULL DEFAULT 0
 );
 
 -- Stored end-of-day summaries. provider_id = '' means the clinic-wide report.

@@ -9,12 +9,12 @@ const pad = (n: number) => String(n).padStart(2, "0");
  */
 export function generateSlotRows(
   providerId: string,
-  weekdays = 6,
+  weekdays = 7,
 ): { id: string; providerId: string; start: string }[] {
   const out: { id: string; providerId: string; start: string }[] = [];
   const base = new Date(`${DEMO_TODAY}T00:00:00`);
   let added = 0;
-  let offset = 1;
+  let offset = 0; // include the demo's "today"
   while (added < weekdays) {
     const day = new Date(base);
     day.setDate(base.getDate() + offset++);

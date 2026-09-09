@@ -95,7 +95,7 @@ export function seedIfEmpty(db: Database): void {
       id: "pat_gomez_2",
       full_name: "Mario Gómez",
       dni: "33.111.456",
-      date_of_birth: "1988-01-22",
+      date_of_birth: "1990-09-09",
       phone: "+54 9 11 5555-4040",
       email: "mario.gomez@example.com",
       coverage: "OSDE 310",
@@ -138,19 +138,21 @@ export function seedIfEmpty(db: Database): void {
     A("apt_1003", "pat_ortiz", "prov_ruiz", "2026-09-10T09:30:00", "Chequeo anual");
     A("apt_1004", "pat_gomez_2", "prov_ruiz", "2026-09-10T11:00:00", "Control de asma");
 
-    // Today (2026-09-09) — already attended, so the daily report has data
-    A("apt_0901", "pat_gomez", "prov_ruiz", "2026-09-09T09:00:00", "Consulta clínica", "completed", 18000);
-    A("apt_0902", "pat_ortiz", "prov_ruiz", "2026-09-09T09:30:00", "Consulta clínica", "completed", 18000);
-    A("apt_0903", "pat_gomez_2", "prov_ruiz", "2026-09-09T10:30:00", "Consulta clínica", "completed", 18000);
+    // Today (2026-09-09) — some already attended (revenue history)…
+    A("apt_0901", "pat_ortiz", "prov_ruiz", "2026-09-09T09:00:00", "Consulta clínica", "completed", 18000);
     A("apt_0904", "pat_fernandez", "prov_sosa", "2026-09-09T10:00:00", "Consulta + ECG", "completed", 42000);
-    A("apt_0905", "pat_ortiz", "prov_sosa", "2026-09-09T11:00:00", "Consulta", "cancelled", 0);
+    // …and Dra. Ruiz still has a live morning to run (for the agenda demo).
+    // Mario cumple años hoy; María y Jorge tienen login y pueden ver la demora.
+    A("apt_0910", "pat_gomez_2", "prov_ruiz", "2026-09-09T10:00:00", "Control de asma", "scheduled", 18000);
+    A("apt_0911", "pat_gomez", "prov_ruiz", "2026-09-09T10:30:00", "Control de presión arterial", "scheduled", 18000);
+    A("apt_0912", "pat_fernandez", "prov_ruiz", "2026-09-09T11:00:00", "Control clínico", "scheduled", 18000);
 
     db.prepare(
       `UPDATE slots SET taken = 1 WHERE id IN (
         'slot_prov_ruiz_2026-09-11_0930','slot_prov_sosa_2026-09-10_1000',
         'slot_prov_ruiz_2026-09-10_0930','slot_prov_ruiz_2026-09-10_1100',
-        'slot_prov_ruiz_2026-09-09_0900','slot_prov_ruiz_2026-09-09_0930',
-        'slot_prov_ruiz_2026-09-09_1030','slot_prov_sosa_2026-09-09_1000'
+        'slot_prov_ruiz_2026-09-09_0900','slot_prov_sosa_2026-09-09_1000',
+        'slot_prov_ruiz_2026-09-09_1000','slot_prov_ruiz_2026-09-09_1030','slot_prov_ruiz_2026-09-09_1100'
       )`,
     ).run();
 

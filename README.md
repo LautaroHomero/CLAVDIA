@@ -57,6 +57,11 @@ Usuarios sembrados:
 Cada profesional tiene una **especialidad** y su propia agenda de turnos; el
 agente la conoce y "mi agenda / mis pacientes" se refieren a esa persona.
 
+**Demo de agenda en vivo:** la Dra. Ruiz arranca el 9/9 con 3 turnos pendientes
+(10:00 Mario Gómez — cumple años, 10:30 María Gómez, 11:00 Jorge Fernández).
+Entrá como Dra. Ruiz → "hacé pasar al que sigue" → "terminé, duró 50 minutos" →
+entrá como **María Gómez** (`1111`) y mirá el aviso de demora.
+
 **Alta de personas nuevas:**
 - **Paciente**: _"¿Sos nuevo/a? Registrate"_ en la pantalla de paciente crea la
   ficha + un login y entra. Cualquier rol ya logueado también puede dar de alta
@@ -114,6 +119,8 @@ Paciente/Recepción/Médico ─► /api/chat  ─► start(secretaryWorkflow, [m
 | Precios por profesional | `listPrices` · `setConsultationFee` · `addPriceItem` | Cada profesional edita los suyos por chat; recepción los de cualquiera (indicando quién). Sin aprobación. El turno guarda su `price` al agendarse. |
 | Recaudación del día | `markAttended` → `getDailyReport` | `markAttended` marca el turno como atendido y lo suma a la caja. El reporte viene filtrado por rol (el profesional ve el suyo, recepción ve todo). |
 | Cierre del día | `closeDay` | **Solo recepción.** Calcula y guarda el resumen del consultorio y el de cada profesional, y lo publica en Slack. En producción lo dispararía un workflow durable al terminar el último turno. |
+| Agenda en vivo (profesional) | `getNextPatient` · `startAttention` · `finishAttention` | Antes de cada paciente el chat/panel le da el **resumen del día** (incluye si **cumple años**). Cuando dice "ok" → `startAttention` (hora real de inicio). Al terminar → `finishAttention` con `actualMinutes` si duró distinto por una práctica. |
+| Demora en el chat del paciente | `getMyVisitStatus` · `changeMyVisitTime` | Al iniciar/terminar cada atención, los pacientes que siguen reciben un **aviso** con su horario estimado nuevo. Pueden **ir más tarde** (solo confirma) o **más temprano** (adelanta el turno si hay hueco). Panel "Tu turno de hoy". |
 | Renovación de receta | `requestHumanApproval` → `createPrescriptionRenewal` | Recepción/paciente la escalan; el/la médico/a la hace directo. |
 | Reembolso ≥ $50.000 o motivo poco claro | `requestHumanApproval` → `refundInvoice` | |
 | Cancelar/reprogramar < 24 h o estudio caro | `requestHumanApproval` → `cancelAppointment` | |
