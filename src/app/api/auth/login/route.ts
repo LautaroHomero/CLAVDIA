@@ -1,45 +1,63 @@
-import { getProvider, getUserByName } from "@/lib/db/repo";
+import { getUserByName, membershipsForUser } from "@/lib/db/repo";
 import { verifyPin } from "@/lib/auth/pin";
-import { sessionSetCookie, signSession } from "@/lib/auth/session";
-import type { Actor, Role } from "@/lib/domain/types";
+import { hydrateActor } from "@/lib/auth/actor";
+import { sessionSetCookie, signSession, type SessionClaims } from "@/lib/auth/session";
 
 type LoginKind = "paciente" | "profesional";
 
-const ROLES_FOR_KIND: Record<LoginKind, Role[]> = {
-  paciente: ["paciente"],
-  profesional: ["medico", "recepcion"],
-};
-
 export async function POST(req: Request) {
-  const { kind, name, pin } = (await req.json()) as {
+  const { kind, name, pin, organizationId } = (await req.json()) as {
     kind?: LoginKind;
     name?: string;
     pin?: string;
+    organizationId?: string;
   };
 
-  if (!kind || !ROLES_FOR_KIND[kind] || !name?.trim() || !pin) {
+  if (!kind || !name?.trim() || !pin) {
     return Response.json({ ok: false, error: "Faltan datos." }, { status: 400 });
   }
 
-  const user = getUserByName(name, ROLES_FOR_KIND[kind]);
+  const user = getUserByName(name);
   if (!user || !verifyPin(pin, user.pinHash, user.pinSalt)) {
+    return Response.json({ ok: false, error: "Nombre o PIN incorrecto." }, { status: 401 });
+  }
+
+  const isPatient = user.role === "paciente";
+  if (isPatient !== (kind === "paciente")) {
     return Response.json(
-      { ok: false, error: "Nombre o PIN incorrecto (o no corresponde a ese perfil)." },
+      { ok: false, error: "Ese usuario no corresponde a ese perfil." },
       { status: 401 },
     );
   }
 
-  const actor: Actor = {
-    userId: user.id,
-    name: user.name,
-    role: user.role,
-    patientId: user.patientId,
-    providerId: user.providerId,
-    specialty: user.providerId ? getProvider(user.providerId)?.specialty : undefined,
-  };
+  const claims: SessionClaims = { userId: user.id, role: user.role, patientId: user.patientId };
 
+  if (!isPatient) {
+    const mems = membershipsForUser(user.id);
+    if (mems.length === 0) {
+      return Response.json({ ok: false, error: "Ese usuario no está en ninguna organización." }, { status: 403 });
+    }
+    if (mems.length > 1 && !organizationId) {
+      // ask the client to pick which org
+      return Response.json({
+        ok: true,
+        needsOrg: true,
+        organizations: mems.map((m) => ({ id: m.organizationId, name: m.organizationName, role: m.role })),
+      });
+    }
+    const chosen = organizationId
+      ? mems.find((m) => m.organizationId === organizationId)
+      : mems[0];
+    if (!chosen) {
+      return Response.json({ ok: false, error: "Organización inválida." }, { status: 400 });
+    }
+    claims.activeOrgId = chosen.organizationId;
+    claims.role = chosen.role;
+  }
+
+  const actor = hydrateActor(claims);
   return Response.json(
     { ok: true, actor },
-    { headers: { "Set-Cookie": sessionSetCookie(signSession(actor)) } },
+    { headers: { "Set-Cookie": sessionSetCookie(signSession(claims)) } },
   );
 }

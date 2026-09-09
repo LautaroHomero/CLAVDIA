@@ -40,12 +40,18 @@ export async function secretaryWorkflow(messages: UIMessage[], actor: Actor) {
   const writable = getWritable<UIMessageChunk>();
   const instructions = await loadAgentInstructions(actor.role);
 
-  const identity =
-    actor.role === "medico"
-      ? `\n\n## Quién sos\nHablás con **${actor.name}**${
-          actor.specialty ? `, ${actor.specialty}` : ""
-        }. "Mi agenda" / "mis pacientes" se refieren a esta persona.`
-      : "";
+  let identity = "";
+  if (actor.role === "paciente") {
+    identity = actor.orgs.length
+      ? `\n\n## Quién sos\nHablás con **${actor.name}** (paciente). Se atiende en: ${actor.orgs
+          .map((o) => o.name)
+          .join(", ")}. Si tiene turnos o pedidos en varios consultorios, tenelos todos en cuenta; cuando una acción necesite uno puntual y no quede claro, preguntá cuál.`
+      : `\n\n## Quién sos\nHablás con **${actor.name}** (paciente). Todavía no eligió consultorio: para pedir un turno primero tiene que sumarse a uno (listOrganizations / joinOrganization).`;
+  } else if (actor.activeOrg) {
+    identity = `\n\n## Quién sos\nHablás con **${actor.name}**${
+      actor.activeOrg.specialty ? `, ${actor.activeOrg.specialty}` : ` (${actor.role})`
+    }, en **${actor.activeOrg.name}**. Todo lo que hacés es en ese consultorio; "mi agenda" / "mis pacientes" son de esta persona en esa organización.`;
+  }
 
   const agent = new DurableAgent({
     model: anthropic(MODEL),

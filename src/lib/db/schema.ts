@@ -1,21 +1,45 @@
 /** DDL applied on every connection (all statements are idempotent). */
 export const SCHEMA = /* sql */ `
-CREATE TABLE IF NOT EXISTS providers (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  specialty   TEXT NOT NULL,
-  room_label  TEXT NOT NULL,
-  default_fee INTEGER NOT NULL DEFAULT 0
+-- ── Multi-tenant core ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS organizations (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  slug       TEXT NOT NULL,
+  address    TEXT NOT NULL DEFAULT '',
+  hours      TEXT NOT NULL DEFAULT 'Lunes a viernes de 8 a 18 h',
+  phone      TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug_unique ON organizations (slug);
+
+CREATE TABLE IF NOT EXISTS users (
+  id       TEXT PRIMARY KEY,
+  name     TEXT NOT NULL,
+  role     TEXT NOT NULL,               -- medico | recepcion | paciente
+  pin_hash TEXT NOT NULL,
+  pin_salt TEXT NOT NULL,
+  patient_id TEXT REFERENCES patients(id)  -- only for role = paciente
+);
+CREATE UNIQUE INDEX IF NOT EXISTS users_name_unique ON users (lower(trim(name)));
+
+-- A staff user's link to an organization (a professional can be in several).
+CREATE TABLE IF NOT EXISTS memberships (
+  user_id         TEXT NOT NULL REFERENCES users(id),
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  role            TEXT NOT NULL,        -- medico | recepcion
+  provider_id     TEXT REFERENCES providers(id),  -- for medico: their provider record in that org
+  PRIMARY KEY (user_id, organization_id)
 );
 
--- Named practice prices per professional (the default consult uses default_fee).
-CREATE TABLE IF NOT EXISTS provider_prices (
-  id          TEXT PRIMARY KEY,
-  provider_id TEXT NOT NULL REFERENCES providers(id),
-  label       TEXT NOT NULL,
-  amount      INTEGER NOT NULL
+-- A patient's link to an organization (they can be treated at several).
+CREATE TABLE IF NOT EXISTS patient_organizations (
+  patient_id      TEXT NOT NULL REFERENCES patients(id),
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  joined_at       TEXT NOT NULL,
+  PRIMARY KEY (patient_id, organization_id)
 );
 
+-- ── Global (per-person) records ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS patients (
   id                TEXT PRIMARY KEY,
   full_name         TEXT NOT NULL,
@@ -38,8 +62,27 @@ CREATE TABLE IF NOT EXISTS medications (
   chronic         INTEGER NOT NULL DEFAULT 0
 );
 
+-- ── Per-organization records ───────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS providers (
+  id              TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  name            TEXT NOT NULL,
+  specialty       TEXT NOT NULL,
+  room_label      TEXT NOT NULL,
+  default_fee     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS provider_prices (
+  id              TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  provider_id     TEXT NOT NULL REFERENCES providers(id),
+  label           TEXT NOT NULL,
+  amount          INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS slots (
   id               TEXT PRIMARY KEY,
+  organization_id  TEXT NOT NULL REFERENCES organizations(id),
   provider_id      TEXT NOT NULL REFERENCES providers(id),
   start            TEXT NOT NULL,
   duration_minutes INTEGER NOT NULL,
@@ -48,6 +91,7 @@ CREATE TABLE IF NOT EXISTS slots (
 
 CREATE TABLE IF NOT EXISTS appointments (
   id               TEXT PRIMARY KEY,
+  organization_id  TEXT NOT NULL REFERENCES organizations(id),
   patient_id       TEXT NOT NULL REFERENCES patients(id),
   provider_id      TEXT NOT NULL REFERENCES providers(id),
   start            TEXT NOT NULL,
@@ -60,103 +104,97 @@ CREATE TABLE IF NOT EXISTS appointments (
   created_via      TEXT NOT NULL DEFAULT 'front-desk'
 );
 
--- Simulated "now" per professional per day, advanced as patients are seen.
-CREATE TABLE IF NOT EXISTS clinic_state (
-  date        TEXT NOT NULL,
-  provider_id TEXT NOT NULL,
-  clock       TEXT NOT NULL,
-  PRIMARY KEY (date, provider_id)
-);
-
--- Messages the agenda pushes to a patient's chat (delay / move-up offers).
-CREATE TABLE IF NOT EXISTS patient_notices (
-  id             TEXT PRIMARY KEY,
-  appointment_id TEXT NOT NULL REFERENCES appointments(id),
-  patient_id     TEXT NOT NULL REFERENCES patients(id),
-  date           TEXT NOT NULL,
-  created_at     TEXT NOT NULL,
-  message        TEXT NOT NULL,
-  resolved       INTEGER NOT NULL DEFAULT 0
-);
-
--- Stored end-of-day summaries. provider_id = '' means the clinic-wide report.
-CREATE TABLE IF NOT EXISTS daily_reports (
-  date         TEXT NOT NULL,
-  provider_id  TEXT NOT NULL DEFAULT '',
-  generated_at TEXT NOT NULL,
-  generated_by TEXT,
-  payload      TEXT NOT NULL,
-  PRIMARY KEY (date, provider_id)
-);
-
 CREATE TABLE IF NOT EXISTS invoices (
-  id         TEXT PRIMARY KEY,
-  patient_id TEXT NOT NULL REFERENCES patients(id),
-  date       TEXT NOT NULL,
-  concept    TEXT NOT NULL,
-  amount     INTEGER NOT NULL,
-  status     TEXT NOT NULL DEFAULT 'unpaid'
+  id              TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  patient_id      TEXT NOT NULL REFERENCES patients(id),
+  date            TEXT NOT NULL,
+  concept         TEXT NOT NULL,
+  amount          INTEGER NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'unpaid'
 );
 
 CREATE TABLE IF NOT EXISTS lab_results (
-  id         TEXT PRIMARY KEY,
-  patient_id TEXT NOT NULL REFERENCES patients(id),
-  date       TEXT NOT NULL,
-  panel      TEXT NOT NULL,
-  status     TEXT NOT NULL DEFAULT 'pending-review',
-  summary    TEXT NOT NULL
+  id              TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  patient_id      TEXT NOT NULL REFERENCES patients(id),
+  date            TEXT NOT NULL,
+  panel           TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending-review',
+  summary         TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS prescription_requests (
-  id           TEXT PRIMARY KEY,
-  patient_id   TEXT NOT NULL REFERENCES patients(id),
-  medication   TEXT NOT NULL,
-  requested_at TEXT NOT NULL,
-  status       TEXT NOT NULL,
-  decided_by   TEXT,
-  note         TEXT
+  id              TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  patient_id      TEXT NOT NULL REFERENCES patients(id),
+  medication      TEXT NOT NULL,
+  requested_at    TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  decided_by      TEXT,
+  note            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS patient_messages (
-  id         TEXT PRIMARY KEY,
-  patient_id TEXT NOT NULL REFERENCES patients(id),
-  body       TEXT NOT NULL,
-  sent_at    TEXT NOT NULL
+  id              TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  patient_id      TEXT NOT NULL REFERENCES patients(id),
+  body            TEXT NOT NULL,
+  sent_at         TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS users (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  role        TEXT NOT NULL,
-  pin_hash    TEXT NOT NULL,
-  pin_salt    TEXT NOT NULL,
-  patient_id  TEXT REFERENCES patients(id),
-  provider_id TEXT REFERENCES providers(id)
+-- Simulated "now" per professional per day.
+CREATE TABLE IF NOT EXISTS clinic_state (
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  date            TEXT NOT NULL,
+  provider_id     TEXT NOT NULL,
+  clock           TEXT NOT NULL,
+  PRIMARY KEY (date, provider_id)
 );
 
--- One login per name (case-insensitive) so typed-name login is unambiguous.
-CREATE UNIQUE INDEX IF NOT EXISTS users_name_unique ON users (lower(trim(name)));
+-- Delay / move-up notices pushed to a patient's chat.
+CREATE TABLE IF NOT EXISTS patient_notices (
+  id              TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  appointment_id  TEXT NOT NULL REFERENCES appointments(id),
+  patient_id      TEXT NOT NULL REFERENCES patients(id),
+  date            TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  message         TEXT NOT NULL,
+  resolved        INTEGER NOT NULL DEFAULT 0
+);
 
--- Human-in-the-loop requests the workflow is blocked on. Shared source of truth
--- for the web UI panel and the Slack integration (fixes cross-process state).
+-- Stored end-of-day summaries. provider_id = '' means the org-wide report.
+CREATE TABLE IF NOT EXISTS daily_reports (
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  date            TEXT NOT NULL,
+  provider_id     TEXT NOT NULL DEFAULT '',
+  generated_at    TEXT NOT NULL,
+  generated_by    TEXT,
+  payload         TEXT NOT NULL,
+  PRIMARY KEY (organization_id, date, provider_id)
+);
+
+-- Human-in-the-loop requests the workflow is blocked on.
 CREATE TABLE IF NOT EXISTS pending_requests (
-  token         TEXT PRIMARY KEY,
-  run_id        TEXT NOT NULL,
-  kind          TEXT NOT NULL,
-  action        TEXT NOT NULL,
-  summary       TEXT NOT NULL,
-  details       TEXT,
-  risk_level    TEXT,
-  patient_name  TEXT,
-  question      TEXT,
-  requested_by  TEXT,
-  created_at    TEXT NOT NULL,
-  channels      TEXT NOT NULL DEFAULT '[]',
-  slack_channel TEXT,
-  slack_ts      TEXT,
-  status        TEXT NOT NULL DEFAULT 'open',
-  resolved_by   TEXT,
-  resolved_at   TEXT,
-  response      TEXT
+  token           TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  run_id          TEXT NOT NULL,
+  kind            TEXT NOT NULL,
+  action          TEXT NOT NULL,
+  summary         TEXT NOT NULL,
+  details         TEXT,
+  risk_level      TEXT,
+  patient_name    TEXT,
+  question        TEXT,
+  requested_by    TEXT,
+  created_at      TEXT NOT NULL,
+  channels        TEXT NOT NULL DEFAULT '[]',
+  slack_channel   TEXT,
+  slack_ts        TEXT,
+  status          TEXT NOT NULL DEFAULT 'open',
+  resolved_by     TEXT,
+  resolved_at     TEXT,
+  response        TEXT
 );
 `;

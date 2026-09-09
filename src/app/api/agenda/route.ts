@@ -1,23 +1,25 @@
-import { actorFromRequest } from "@/lib/auth/session";
+import { actorFromRequest } from "@/lib/auth/actor";
 import { buildPatientBriefing } from "@/lib/domain/briefing";
 import { DEMO_TODAY } from "@/lib/domain/clock";
 import {
   earlierOpeningToday,
+  getOrganization,
   listPatientNotices,
-  patientAppointmentToday,
+  patientNextAppointment,
   providerAgenda,
 } from "@/lib/db/repo";
 
-/** Live-agenda snapshot for the side panel. Role-aware. */
+/** Live-agenda snapshot for the side panel. Role- and org-aware. */
 export async function GET(req: Request) {
   const actor = actorFromRequest(req);
   if (!actor) return Response.json({ error: "No autenticado." }, { status: 401 });
 
-  if (actor.role === "medico" && actor.providerId) {
-    const a = providerAgenda(actor.providerId, DEMO_TODAY);
+  if (actor.role === "medico" && actor.activeOrg?.providerId) {
+    const a = providerAgenda(actor.activeOrg.providerId, DEMO_TODAY);
     const target = a.inAttention ?? a.next;
     return Response.json({
       role: "medico",
+      organization: actor.activeOrg.name,
       clock: a.clock,
       running: a.running,
       offsetMinutes: a.offsetMinutes,
@@ -25,13 +27,14 @@ export async function GET(req: Request) {
       inAttention: a.inAttention ?? null,
       next: a.next ?? null,
       upcoming: a.upcoming,
-      briefing: target ? buildPatientBriefing(target.patientId).summary : null,
+      briefing: target ? buildPatientBriefing(target.patientId, actor.activeOrg.id).summary : null,
       briefingFor: target?.appointmentId ?? null,
     });
   }
 
   if (actor.role === "paciente" && actor.patientId) {
-    const appt = patientAppointmentToday(actor.patientId, DEMO_TODAY);
+    const orgIds = actor.orgs.map((o) => o.id);
+    const appt = patientNextAppointment(actor.patientId, DEMO_TODAY, orgIds);
     const notices = listPatientNotices(actor.patientId, DEMO_TODAY).map((n) => n.message);
     if (!appt) return Response.json({ role: "paciente", hasVisit: false, notices });
 
@@ -42,6 +45,7 @@ export async function GET(req: Request) {
     return Response.json({
       role: "paciente",
       hasVisit: true,
+      organization: getOrganization(appt.organizationId)?.name ?? "",
       provider: a.providerName,
       reason: appt.reason,
       scheduled: entry?.scheduled ?? null,

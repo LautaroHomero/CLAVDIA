@@ -4,26 +4,48 @@ export type ISODate = string; // "2026-09-14"
 export type ISODateTime = string; // "2026-09-14T10:30:00"
 
 export type Role = "medico" | "recepcion" | "paciente";
+export type StaffRole = "medico" | "recepcion";
+
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  address: string;
+  hours: string;
+  phone: string;
+}
+
+export interface OrgRef {
+  id: string;
+  name: string;
+}
+
+/** A staff user's active organization for the session. */
+export interface StaffOrg extends OrgRef {
+  role: StaffRole;
+  providerId?: string; // for medico
+  specialty?: string;
+}
 
 export interface User {
   id: string;
   name: string;
   role: Role;
-  /** Set when role === "paciente": the patient record this user is. */
   patientId?: string;
-  /** Set when role === "medico": the provider record this user is. */
-  providerId?: string;
 }
 
-/** Who is talking to the agent — derived from the session, passed into the workflow. */
+/**
+ * Who is talking to the agent — rehydrated from the session on every request.
+ * `activeOrg` is set for staff (the org they chose at login). Patients operate
+ * across all `orgs` they belong to.
+ */
 export interface Actor {
   userId: string;
   name: string;
   role: Role;
   patientId?: string;
-  providerId?: string;
-  /** For role === "medico": the professional's specialty, e.g. "Dermatología". */
-  specialty?: string;
+  activeOrg?: StaffOrg;
+  orgs: OrgRef[];
 }
 
 export interface Patient {
@@ -51,6 +73,7 @@ export type AppointmentStatus = "scheduled" | "in-progress" | "cancelled" | "com
 
 export interface Appointment {
   id: string;
+  organizationId: string;
   patientId: string;
   providerId: string;
   start: ISODateTime;
@@ -65,6 +88,7 @@ export interface Appointment {
 
 export interface Provider {
   id: string;
+  organizationId: string;
   name: string;
   specialty: string;
   roomLabel: string;
@@ -89,6 +113,7 @@ export type InvoiceStatus = "paid" | "unpaid" | "refunded";
 
 export interface Invoice {
   id: string;
+  organizationId: string;
   patientId: string;
   date: ISODate;
   concept: string;

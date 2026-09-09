@@ -37,8 +37,10 @@ function ageFrom(dob: string): number {
 
 /**
  * Compiles the "pre-visit briefing" the agent shows before attending a patient.
+ * Scoped to `orgId` when given (a professional sees their own org's turns,
+ * invoices and labs — the ficha itself is global).
  */
-export function buildPatientBriefing(patientId: string): PatientBriefing {
+export function buildPatientBriefing(patientId: string, orgId?: string): PatientBriefing {
   const patient = getPatient(patientId);
   if (!patient) {
     return {
@@ -48,16 +50,17 @@ export function buildPatientBriefing(patientId: string): PatientBriefing {
   }
 
   const age = ageFrom(patient.dateOfBirth);
-  const upcoming = getUpcomingAppointments(patient.id).map((a) => ({
+  const orgFilter = orgId ? [orgId] : undefined;
+  const upcoming = getUpcomingAppointments(patient.id, orgFilter).map((a) => ({
     id: a.id,
     when: a.start.replace("T", " "),
     provider: getProvider(a.providerId)?.name ?? a.providerId,
     reason: a.reason,
   }));
-  const outstanding = getInvoicesForPatient(patient.id)
+  const outstanding = getInvoicesForPatient(patient.id, orgId)
     .filter((i) => i.status === "unpaid")
     .map((i) => ({ id: i.id, concept: i.concept, amount: i.amount, date: i.date }));
-  const pendingLabs = getLabResultsForPatient(patient.id)
+  const pendingLabs = getLabResultsForPatient(patient.id, orgId)
     .filter((l) => l.status === "pending-review")
     .map((l) => ({ id: l.id, panel: l.panel, date: l.date, summary: l.summary }));
 

@@ -1,11 +1,12 @@
-import { actorFromRequest } from "@/lib/auth/session";
+import { actorFromRequest } from "@/lib/auth/actor";
 import { DEMO_TODAY } from "@/lib/domain/clock";
 import {
   freeSlotCount,
   getAppointmentsForPatient,
+  getOrganization,
+  getPatient,
   getProvider,
   isBirthday,
-  getPatient,
   providerAgenda,
   providerAppointments,
 } from "@/lib/db/repo";
@@ -26,19 +27,20 @@ function groupByDate<T>(rows: { date: string; item: T }[]): { date: string; labe
   return [...map.entries()].map(([date, items]) => ({ date, label: dayLabel(date), items }));
 }
 
-/** Mini schedule for the side panel. Professional: their whole agenda. Patient: their own turns. */
+/** Mini schedule. Professional: their agenda in the active org. Patient: their turns across all orgs. */
 export async function GET(req: Request) {
   const actor = actorFromRequest(req);
   if (!actor) return Response.json({ error: "No autenticado." }, { status: 401 });
 
   const upcoming = (a: Appointment) => a.start.slice(0, 10) >= DEMO_TODAY && a.status !== "cancelled";
 
-  if (actor.role === "medico" && actor.providerId) {
-    const today = providerAgenda(actor.providerId, DEMO_TODAY);
+  if (actor.role === "medico" && actor.activeOrg?.providerId) {
+    const pid = actor.activeOrg.providerId;
+    const today = providerAgenda(pid, DEMO_TODAY);
     const estimatedFor = (id: string) =>
       [today.inAttention, today.next, ...today.upcoming].find((e) => e?.appointmentId === id)?.estimated;
 
-    const rows = providerAppointments(actor.providerId)
+    const rows = providerAppointments(pid)
       .filter(upcoming)
       .map((a) => ({
         date: a.start.slice(0, 10),
@@ -52,12 +54,14 @@ export async function GET(req: Request) {
         },
       }));
 
-    const days = groupByDate(rows).map((d) => ({ ...d, free: freeSlotCount(actor.providerId!, d.date) }));
-    return Response.json({ role: "medico", title: "Mi agenda", days });
+    const days = groupByDate(rows).map((d) => ({ ...d, free: freeSlotCount(pid, d.date) }));
+    return Response.json({ role: "medico", title: `Mi agenda · ${actor.activeOrg.name}`, days });
   }
 
   if (actor.role === "paciente" && actor.patientId) {
-    const rows = getAppointmentsForPatient(actor.patientId)
+    const orgIds = actor.orgs.map((o) => o.id);
+    const multiOrg = actor.orgs.length > 1;
+    const rows = getAppointmentsForPatient(actor.patientId, orgIds)
       .filter(upcoming)
       .map((a) => {
         const prov = getProvider(a.providerId);
@@ -66,12 +70,13 @@ export async function GET(req: Request) {
           const ag = providerAgenda(a.providerId, DEMO_TODAY);
           estimated = [ag.inAttention, ag.next, ...ag.upcoming].find((e) => e?.appointmentId === a.id)?.estimated;
         }
+        const orgName = getOrganization(a.organizationId)?.name ?? "";
         return {
           date: a.start.slice(0, 10),
           item: {
             time: a.start.slice(11, 16),
             who: prov ? `${prov.name} · ${prov.specialty}` : a.providerId,
-            reason: a.reason,
+            reason: multiOrg ? `${a.reason} · ${orgName}` : a.reason,
             status: a.status,
             birthday: false,
             estimated,

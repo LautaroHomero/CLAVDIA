@@ -11,6 +11,7 @@ import { humanHook } from "./hooks";
 
 export interface RequestHumanArgs {
   token: string;
+  organizationId: string;
   kind: HumanRequestKind;
   action: string;
   summary: string;
@@ -45,6 +46,7 @@ async function notifyHuman(args: RequestHumanArgs): Promise<PendingHumanRequest>
   const { workflowRunId } = getWorkflowMetadata();
   const req: PendingHumanRequest = {
     token: args.token,
+    organizationId: args.organizationId,
     runId: workflowRunId,
     kind: args.kind,
     action: args.action,

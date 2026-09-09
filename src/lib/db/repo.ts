@@ -4,6 +4,8 @@ import type {
   Invoice,
   LabResult,
   Medication,
+  OrgRef,
+  Organization,
   Patient,
   PatientMessage,
   PrescriptionRequest,
@@ -11,6 +13,7 @@ import type {
   Provider,
   Role,
   Slot,
+  StaffRole,
   User,
 } from "@/lib/domain/types";
 import { DEMO_TODAY } from "@/lib/domain/clock";
@@ -18,113 +21,213 @@ import { getDb } from "./connection";
 import { generateSlotRows } from "./slots";
 
 const TODAY = DEMO_TODAY;
+type Row = Record<string, unknown>;
+const uid = (p: string) => `${p}_${randomUUID().slice(0, 8)}`;
 
 // ---------------------------------------------------------------------------
 // Row mappers
 // ---------------------------------------------------------------------------
 
-type Row = Record<string, unknown>;
+const toProvider = (r: Row): Provider => ({
+  id: r.id as string,
+  organizationId: r.organization_id as string,
+  name: r.name as string,
+  specialty: r.specialty as string,
+  roomLabel: r.room_label as string,
+  defaultFee: (r.default_fee as number) ?? 0,
+});
 
-function toProvider(r: Row): Provider {
-  return {
-    id: r.id as string,
-    name: r.name as string,
-    specialty: r.specialty as string,
-    roomLabel: r.room_label as string,
-    defaultFee: (r.default_fee as number) ?? 0,
-  };
+const toMedication = (r: Row): Medication => ({
+  name: r.name as string,
+  dose: r.dose as string,
+  lastPrescribed: r.last_prescribed as string,
+  chronic: Boolean(r.chronic),
+});
+
+const toPatient = (r: Row, meds: Medication[]): Patient => ({
+  id: r.id as string,
+  fullName: r.full_name as string,
+  dni: r.dni as string,
+  dateOfBirth: r.date_of_birth as string,
+  phone: r.phone as string,
+  email: r.email as string,
+  coverage: r.coverage as string,
+  allergies: JSON.parse((r.allergies as string) || "[]"),
+  activeConditions: JSON.parse((r.active_conditions as string) || "[]"),
+  medications: meds,
+  notes: (r.notes as string) ?? undefined,
+});
+
+const toAppointment = (r: Row): Appointment => ({
+  id: r.id as string,
+  organizationId: r.organization_id as string,
+  patientId: r.patient_id as string,
+  providerId: r.provider_id as string,
+  start: r.start as string,
+  durationMinutes: r.duration_minutes as number,
+  reason: r.reason as string,
+  status: r.status as Appointment["status"],
+  price: (r.price as number) ?? 0,
+  actualStart: (r.actual_start as string) ?? undefined,
+  actualEnd: (r.actual_end as string) ?? undefined,
+  createdVia: r.created_via as Appointment["createdVia"],
+});
+
+const toSlot = (r: Row): Slot => ({
+  id: r.id as string,
+  providerId: r.provider_id as string,
+  start: r.start as string,
+  durationMinutes: r.duration_minutes as number,
+  taken: Boolean(r.taken),
+});
+
+const toInvoice = (r: Row): Invoice => ({
+  id: r.id as string,
+  organizationId: r.organization_id as string,
+  patientId: r.patient_id as string,
+  date: r.date as string,
+  concept: r.concept as string,
+  amount: r.amount as number,
+  status: r.status as Invoice["status"],
+});
+
+const toLab = (r: Row): LabResult => ({
+  id: r.id as string,
+  patientId: r.patient_id as string,
+  date: r.date as string,
+  panel: r.panel as string,
+  status: r.status as LabResult["status"],
+  summary: r.summary as string,
+});
+
+// ---------------------------------------------------------------------------
+// Organizations
+// ---------------------------------------------------------------------------
+
+const toOrg = (r: Row): Organization => ({
+  id: r.id as string,
+  name: r.name as string,
+  slug: r.slug as string,
+  address: r.address as string,
+  hours: r.hours as string,
+  phone: r.phone as string,
+});
+
+export function listOrganizations(): Organization[] {
+  return (getDb().prepare("SELECT * FROM organizations ORDER BY name").all() as Row[]).map(toOrg);
 }
 
-function toMedication(r: Row): Medication {
-  return {
-    name: r.name as string,
-    dose: r.dose as string,
-    lastPrescribed: r.last_prescribed as string,
-    chronic: Boolean(r.chronic),
-  };
+export function getOrganization(id: string): Organization | undefined {
+  const r = getDb().prepare("SELECT * FROM organizations WHERE id = ?").get(id) as Row | undefined;
+  return r ? toOrg(r) : undefined;
 }
 
-function toPatient(r: Row, meds: Medication[]): Patient {
-  return {
-    id: r.id as string,
-    fullName: r.full_name as string,
-    dni: r.dni as string,
-    dateOfBirth: r.date_of_birth as string,
-    phone: r.phone as string,
-    email: r.email as string,
-    coverage: r.coverage as string,
-    allergies: JSON.parse((r.allergies as string) || "[]"),
-    activeConditions: JSON.parse((r.active_conditions as string) || "[]"),
-    medications: meds,
-    notes: (r.notes as string) ?? undefined,
-  };
+function normName(s: string): string {
+  return s.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 }
 
-function toAppointment(r: Row): Appointment {
-  return {
-    id: r.id as string,
-    patientId: r.patient_id as string,
-    providerId: r.provider_id as string,
-    start: r.start as string,
-    durationMinutes: r.duration_minutes as number,
-    reason: r.reason as string,
-    status: r.status as Appointment["status"],
-    price: (r.price as number) ?? 0,
-    actualStart: (r.actual_start as string) ?? undefined,
-    actualEnd: (r.actual_end as string) ?? undefined,
-    createdVia: r.created_via as Appointment["createdVia"],
-  };
+function slugify(s: string): string {
+  return normName(s).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "org";
 }
 
-function toSlot(r: Row): Slot {
-  return {
-    id: r.id as string,
-    providerId: r.provider_id as string,
-    start: r.start as string,
-    durationMinutes: r.duration_minutes as number,
-    taken: Boolean(r.taken),
-  };
+export function createOrganization(input: {
+  name: string;
+  address?: string;
+  phone?: string;
+  hours?: string;
+}): Organization {
+  const db = getDb();
+  let slug = slugify(input.name);
+  if (db.prepare("SELECT 1 FROM organizations WHERE slug = ?").get(slug)) slug = `${slug}-${uid("").slice(1, 5)}`;
+  const id = uid("org");
+  db.prepare(
+    "INSERT INTO organizations (id, name, slug, address, hours, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    id,
+    input.name.trim(),
+    slug,
+    input.address?.trim() ?? "",
+    input.hours?.trim() || "Lunes a viernes de 8 a 18 h",
+    input.phone?.trim() ?? "",
+    new Date().toISOString(),
+  );
+  return getOrganization(id)!;
 }
 
-function toInvoice(r: Row): Invoice {
-  return {
-    id: r.id as string,
-    patientId: r.patient_id as string,
-    date: r.date as string,
-    concept: r.concept as string,
-    amount: r.amount as number,
-    status: r.status as Invoice["status"],
-  };
+export function organizationNameTaken(name: string): boolean {
+  const t = normName(name);
+  return (getDb().prepare("SELECT name FROM organizations").all() as Row[]).some(
+    (r) => normName(r.name as string) === t,
+  );
 }
 
-function toLab(r: Row): LabResult {
-  return {
-    id: r.id as string,
-    patientId: r.patient_id as string,
-    date: r.date as string,
-    panel: r.panel as string,
-    status: r.status as LabResult["status"],
-    summary: r.summary as string,
-  };
+// ---------------------------------------------------------------------------
+// Users, memberships, auth
+// ---------------------------------------------------------------------------
+
+const toUser = (r: Row): User => ({
+  id: r.id as string,
+  name: r.name as string,
+  role: r.role as Role,
+  patientId: (r.patient_id as string) ?? undefined,
+});
+
+export interface Membership {
+  organizationId: string;
+  organizationName: string;
+  role: StaffRole;
+  providerId?: string;
+  specialty?: string;
 }
 
-function toUser(r: Row): User {
-  return {
-    id: r.id as string,
-    name: r.name as string,
-    role: r.role as Role,
-    patientId: (r.patient_id as string) ?? undefined,
+export function membershipsForUser(userId: string): Membership[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT m.organization_id, o.name AS org_name, m.role, m.provider_id, p.specialty
+         FROM memberships m
+         JOIN organizations o ON o.id = m.organization_id
+         LEFT JOIN providers p ON p.id = m.provider_id
+         WHERE m.user_id = ?
+         ORDER BY o.name`,
+      )
+      .all(userId) as Row[]
+  ).map((r) => ({
+    organizationId: r.organization_id as string,
+    organizationName: r.org_name as string,
+    role: r.role as StaffRole,
     providerId: (r.provider_id as string) ?? undefined,
-  };
+    specialty: (r.specialty as string) ?? undefined,
+  }));
 }
 
-// ---------------------------------------------------------------------------
-// Users / auth
-// ---------------------------------------------------------------------------
+export function patientOrgs(patientId: string): OrgRef[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT o.id, o.name FROM patient_organizations po
+         JOIN organizations o ON o.id = po.organization_id
+         WHERE po.patient_id = ? ORDER BY o.name`,
+      )
+      .all(patientId) as Row[]
+  ).map((r) => ({ id: r.id as string, name: r.name as string }));
+}
 
-/** For the login picker — no secrets. */
-export function listUsers(): (User & { role: Role })[] {
-  return (getDb().prepare("SELECT * FROM users ORDER BY role, name").all() as Row[]).map(toUser);
+export function joinPatientOrg(patientId: string, organizationId: string): void {
+  getDb()
+    .prepare(
+      "INSERT OR IGNORE INTO patient_organizations (patient_id, organization_id, joined_at) VALUES (?, ?, ?)",
+    )
+    .run(patientId, organizationId, new Date().toISOString());
+}
+
+export function getUserByName(name: string): (User & { pinHash: string; pinSalt: string }) | undefined {
+  const target = normName(name);
+  const r = (getDb().prepare("SELECT * FROM users").all() as Row[]).find(
+    (row) => normName(row.name as string) === target,
+  );
+  if (!r) return undefined;
+  return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
 }
 
 export function getUser(id: string): User | undefined {
@@ -132,64 +235,63 @@ export function getUser(id: string): User | undefined {
   return r ? toUser(r) : undefined;
 }
 
-export function getUserWithPin(
-  id: string,
-): (User & { pinHash: string; pinSalt: string }) | undefined {
-  const r = getDb().prepare("SELECT * FROM users WHERE id = ?").get(id) as Row | undefined;
-  if (!r) return undefined;
-  return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
-}
-
-/** Normalize a name for matching: trim, lowercase, strip accents. */
-function normName(s: string): string {
-  return s
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
-
-/** Login by typed name (case- and accent-insensitive), optionally restricted to roles. */
-export function getUserByName(
-  name: string,
-  roles?: Role[],
-): (User & { pinHash: string; pinSalt: string }) | undefined {
-  const target = normName(name);
-  const rows = getDb().prepare("SELECT * FROM users").all() as Row[];
-  const r = rows.find((row) => normName(row.name as string) === target);
-  if (!r) return undefined;
-  if (roles && !roles.includes(r.role as Role)) return undefined;
-  return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
+/** Staff names, for login hints (no secrets). */
+export function listStaffNames(): { name: string; orgs: string[] }[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT u.id, u.name, group_concat(o.name, ' · ') AS orgs
+       FROM users u
+       JOIN memberships m ON m.user_id = u.id
+       JOIN organizations o ON o.id = m.organization_id
+       WHERE u.role != 'paciente'
+       GROUP BY u.id ORDER BY u.name`,
+    )
+    .all() as Row[];
+  return rows.map((r) => ({ name: r.name as string, orgs: ((r.orgs as string) ?? "").split(" · ") }));
 }
 
 export function userNameTaken(name: string): boolean {
-  const target = normName(name);
-  const rows = getDb().prepare("SELECT name FROM users").all() as Row[];
-  return rows.some((row) => normName(row.name as string) === target);
+  const t = normName(name);
+  return (getDb().prepare("SELECT name FROM users").all() as Row[]).some(
+    (r) => normName(r.name as string) === t,
+  );
 }
 
-/** Creates a login (used by patient self-signup and by the registerPatient tool). */
-export function createPatientUser(args: {
+export function createUser(args: {
   name: string;
+  role: Role;
   pinHash: string;
   pinSalt: string;
-  patientId: string;
+  patientId?: string;
 }): User {
-  const id = `u_${randomUUID().slice(0, 8)}`;
+  const id = uid("u");
+  getDb()
+    .prepare("INSERT INTO users (id, name, role, pin_hash, pin_salt, patient_id) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(id, args.name.trim(), args.role, args.pinHash, args.pinSalt, args.patientId ?? null);
+  return { id, name: args.name.trim(), role: args.role, patientId: args.patientId };
+}
+
+export function addMembership(args: {
+  userId: string;
+  organizationId: string;
+  role: StaffRole;
+  providerId?: string;
+}): void {
   getDb()
     .prepare(
-      "INSERT INTO users (id, name, role, pin_hash, pin_salt, patient_id) VALUES (?, ?, 'paciente', ?, ?, ?)",
+      "INSERT OR REPLACE INTO memberships (user_id, organization_id, role, provider_id) VALUES (?, ?, ?, ?)",
     )
-    .run(id, args.name.trim(), args.pinHash, args.pinSalt, args.patientId);
-  return { id, name: args.name.trim(), role: "paciente", patientId: args.patientId };
+    .run(args.userId, args.organizationId, args.role, args.providerId ?? null);
 }
 
 // ---------------------------------------------------------------------------
-// Providers
+// Providers (per org)
 // ---------------------------------------------------------------------------
 
-export function listProviders(): Provider[] {
-  return (getDb().prepare("SELECT * FROM providers ORDER BY name").all() as Row[]).map(toProvider);
+export function listProviders(orgId: string): Provider[] {
+  return (
+    getDb().prepare("SELECT * FROM providers WHERE organization_id = ? ORDER BY name").all(orgId) as Row[]
+  ).map(toProvider);
 }
 
 export function getProvider(id: string): Provider | undefined {
@@ -197,44 +299,53 @@ export function getProvider(id: string): Provider | undefined {
   return r ? toProvider(r) : undefined;
 }
 
-export function providerNameTaken(name: string): boolean {
-  const target = normName(name);
-  return (getDb().prepare("SELECT name FROM providers").all() as Row[]).some(
-    (r) => normName(r.name as string) === target,
-  );
+export function providerNameTakenInOrg(orgId: string, name: string): boolean {
+  const t = normName(name);
+  return (
+    getDb().prepare("SELECT name FROM providers WHERE organization_id = ?").all(orgId) as Row[]
+  ).some((r) => normName(r.name as string) === t);
 }
 
-/** Creates a professional (provider + login) and seeds their bookable slots. */
+/** Creates a professional in an org: provider + login (if new) + membership + slots. */
 export function createProfessional(args: {
+  organizationId: string;
   name: string;
   specialty: string;
   roomLabel: string;
   pinHash: string;
   pinSalt: string;
-}): { provider: Provider; userId: string } {
+}): { provider: Provider; userId: string; reusedUser: boolean } {
   const db = getDb();
-  const providerId = `prov_${randomUUID().slice(0, 8)}`;
-  const userId = `u_${randomUUID().slice(0, 8)}`;
+  const providerId = uid("prov");
+  const existingUser = getUserByName(args.name);
+  const userId = existingUser?.id ?? uid("u");
+  const reusedUser = Boolean(existingUser);
+
   const tx = db.transaction(() => {
     db.prepare(
-      "INSERT INTO providers (id, name, specialty, room_label) VALUES (?, ?, ?, ?)",
-    ).run(providerId, args.name.trim(), args.specialty.trim(), args.roomLabel.trim());
+      "INSERT INTO providers (id, organization_id, name, specialty, room_label, default_fee) VALUES (?, ?, ?, ?, ?, 0)",
+    ).run(providerId, args.organizationId, args.name.trim(), args.specialty.trim(), args.roomLabel.trim());
 
     const slot = db.prepare(
-      "INSERT INTO slots (id, provider_id, start, duration_minutes, taken) VALUES (?, ?, ?, 30, 0)",
+      "INSERT INTO slots (id, organization_id, provider_id, start, duration_minutes, taken) VALUES (?, ?, ?, ?, 30, 0)",
     );
-    for (const s of generateSlotRows(providerId)) slot.run(s.id, s.providerId, s.start);
+    for (const s of generateSlotRows(providerId)) slot.run(s.id, args.organizationId, s.providerId, s.start);
 
+    if (!existingUser) {
+      db.prepare(
+        "INSERT INTO users (id, name, role, pin_hash, pin_salt) VALUES (?, ?, 'medico', ?, ?)",
+      ).run(userId, args.name.trim(), args.pinHash, args.pinSalt);
+    }
     db.prepare(
-      "INSERT INTO users (id, name, role, pin_hash, pin_salt, provider_id) VALUES (?, ?, 'medico', ?, ?, ?)",
-    ).run(userId, args.name.trim(), args.pinHash, args.pinSalt, providerId);
+      "INSERT OR REPLACE INTO memberships (user_id, organization_id, role, provider_id) VALUES (?, ?, 'medico', ?)",
+    ).run(userId, args.organizationId, providerId);
   });
   tx();
-  return { provider: getProvider(providerId)!, userId };
+  return { provider: getProvider(providerId)!, userId, reusedUser };
 }
 
 // ---------------------------------------------------------------------------
-// Patients
+// Patients (global ficha)
 // ---------------------------------------------------------------------------
 
 function medsFor(patientId: string): Medication[] {
@@ -266,9 +377,8 @@ export interface NewPatientInput {
   notes?: string;
 }
 
-/** Inserts a patient record. Returns the created patient. */
 export function createPatient(input: NewPatientInput): Patient {
-  const id = `pat_${randomUUID().slice(0, 8)}`;
+  const id = uid("pat");
   getDb()
     .prepare(
       `INSERT INTO patients (id, full_name, dni, date_of_birth, phone, email, coverage, allergies, active_conditions, notes)
@@ -287,20 +397,31 @@ export function createPatient(input: NewPatientInput): Patient {
   return getPatient(id)!;
 }
 
-export function searchPatients(query: string): Patient[] {
+/** Search patients that belong to a given org. */
+export function searchPatients(orgId: string, query: string): Patient[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
   const bare = q.replace(/\./g, "");
   const rows = getDb()
     .prepare(
-      `SELECT * FROM patients
-       WHERE lower(full_name) LIKE ?
-          OR replace(dni, '.', '') LIKE ?
-          OR lower(email) LIKE ?
-          OR id = ?`,
+      `SELECT p.* FROM patients p
+       JOIN patient_organizations po ON po.patient_id = p.id
+       WHERE po.organization_id = @org
+         AND ( lower(p.full_name) LIKE @like
+            OR replace(p.dni, '.', '') LIKE @bare
+            OR lower(p.email) LIKE @like
+            OR p.id = @exact )`,
     )
-    .all(`%${q}%`, `%${bare}%`, `%${q}%`, q) as Row[];
+    .all({ org: orgId, like: `%${q}%`, bare: `%${bare}%`, exact: q }) as Row[];
   return rows.map((r) => toPatient(r, medsFor(r.id as string)));
+}
+
+export function patientInOrg(patientId: string, orgId: string): boolean {
+  return Boolean(
+    getDb()
+      .prepare("SELECT 1 FROM patient_organizations WHERE patient_id = ? AND organization_id = ?")
+      .get(patientId, orgId),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -312,35 +433,38 @@ export function getAppointment(id: string): Appointment | undefined {
   return r ? toAppointment(r) : undefined;
 }
 
-export function getAppointmentsForPatient(patientId: string): Appointment[] {
-  return (
-    getDb()
-      .prepare("SELECT * FROM appointments WHERE patient_id = ? ORDER BY start")
-      .all(patientId) as Row[]
-  ).map(toAppointment);
+export function getAppointmentsForPatient(patientId: string, orgIds?: string[]): Appointment[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM appointments WHERE patient_id = ? ORDER BY start")
+    .all(patientId) as Row[];
+  const list = rows.map(toAppointment);
+  return orgIds ? list.filter((a) => orgIds.includes(a.organizationId)) : list;
 }
 
-export function getUpcomingAppointments(patientId: string): Appointment[] {
-  return getAppointmentsForPatient(patientId).filter(
+export function getUpcomingAppointments(patientId: string, orgIds?: string[]): Appointment[] {
+  return getAppointmentsForPatient(patientId, orgIds).filter(
     (a) => a.status === "scheduled" && a.start >= TODAY,
   );
 }
 
-/** Agenda view: upcoming + in-progress appointments, optionally filtered. */
-export function listAppointments(opts: { providerId?: string; date?: string } = {}): Appointment[] {
+/** Agenda view for an org: scheduled + in-progress, optional provider/date filter. */
+export function listAppointments(
+  orgId: string,
+  opts: { providerId?: string; date?: string } = {},
+): Appointment[] {
   const rows = getDb()
     .prepare(
       `SELECT * FROM appointments
-       WHERE status IN ('scheduled', 'in-progress')
+       WHERE organization_id = @org
+         AND status IN ('scheduled', 'in-progress')
          AND (@providerId IS NULL OR provider_id = @providerId)
          AND (@date IS NULL OR substr(start, 1, 10) = @date)
        ORDER BY start`,
     )
-    .all({ providerId: opts.providerId ?? null, date: opts.date ?? null }) as Row[];
+    .all({ org: orgId, providerId: opts.providerId ?? null, date: opts.date ?? null }) as Row[];
   return rows.map(toAppointment);
 }
 
-/** The appointment a provider is currently in, if any. */
 export function inProgressAppointment(providerId: string, date: string): Appointment | undefined {
   const r = getDb()
     .prepare(
@@ -350,26 +474,6 @@ export function inProgressAppointment(providerId: string, date: string): Appoint
   return r ? toAppointment(r) : undefined;
 }
 
-/** Every appointment of a professional, any date, oldest first. */
-export function providerAppointments(providerId: string): Appointment[] {
-  return (
-    getDb()
-      .prepare("SELECT * FROM appointments WHERE provider_id = ? ORDER BY start")
-      .all(providerId) as Row[]
-  ).map(toAppointment);
-}
-
-export function freeSlotCount(providerId: string, date: string): number {
-  return (
-    getDb()
-      .prepare(
-        "SELECT COUNT(*) AS n FROM slots WHERE provider_id = ? AND taken = 0 AND substr(start,1,10) = ?",
-      )
-      .get(providerId, date) as { n: number }
-  ).n;
-}
-
-/** The provider's next not-yet-started appointment for a day. */
 export function nextScheduledAppointment(providerId: string, date: string): Appointment | undefined {
   const r = getDb()
     .prepare(
@@ -379,20 +483,26 @@ export function nextScheduledAppointment(providerId: string, date: string): Appo
   return r ? toAppointment(r) : undefined;
 }
 
+export function providerAppointments(providerId: string): Appointment[] {
+  return (
+    getDb().prepare("SELECT * FROM appointments WHERE provider_id = ? ORDER BY start").all(providerId) as Row[]
+  ).map(toAppointment);
+}
+
 // ---------------------------------------------------------------------------
 // Slots
 // ---------------------------------------------------------------------------
 
-export function listOpenSlots(opts: { providerId?: string; date?: string } = {}): Slot[] {
+export function listOpenSlots(orgId: string, opts: { providerId?: string; date?: string } = {}): Slot[] {
   const rows = getDb()
     .prepare(
       `SELECT * FROM slots
-       WHERE taken = 0
+       WHERE organization_id = @org AND taken = 0
          AND (@providerId IS NULL OR provider_id = @providerId)
          AND (@date IS NULL OR substr(start, 1, 10) = @date)
        ORDER BY start`,
     )
-    .all({ providerId: opts.providerId ?? null, date: opts.date ?? null }) as Row[];
+    .all({ org: orgId, providerId: opts.providerId ?? null, date: opts.date ?? null }) as Row[];
   return rows.map(toSlot);
 }
 
@@ -401,14 +511,25 @@ export function getSlot(id: string): Slot | undefined {
   return r ? toSlot(r) : undefined;
 }
 
+export function freeSlotCount(providerId: string, date: string): number {
+  return (
+    getDb()
+      .prepare("SELECT COUNT(*) AS n FROM slots WHERE provider_id = ? AND taken = 0 AND substr(start,1,10) = ?")
+      .get(providerId, date) as { n: number }
+  ).n;
+}
+
 // ---------------------------------------------------------------------------
 // Invoices / labs
 // ---------------------------------------------------------------------------
 
-export function getInvoicesForPatient(patientId: string): Invoice[] {
-  return (
-    getDb().prepare("SELECT * FROM invoices WHERE patient_id = ? ORDER BY date").all(patientId) as Row[]
-  ).map(toInvoice);
+export function getInvoicesForPatient(patientId: string, orgId?: string): Invoice[] {
+  const rows = orgId
+    ? (getDb()
+        .prepare("SELECT * FROM invoices WHERE patient_id = ? AND organization_id = ? ORDER BY date")
+        .all(patientId, orgId) as Row[])
+    : (getDb().prepare("SELECT * FROM invoices WHERE patient_id = ? ORDER BY date").all(patientId) as Row[]);
+  return rows.map(toInvoice);
 }
 
 export function getInvoice(id: string): Invoice | undefined {
@@ -416,31 +537,40 @@ export function getInvoice(id: string): Invoice | undefined {
   return r ? toInvoice(r) : undefined;
 }
 
-export function getLabResultsForPatient(patientId: string): LabResult[] {
-  return (
-    getDb().prepare("SELECT * FROM lab_results WHERE patient_id = ? ORDER BY date DESC").all(patientId) as Row[]
-  ).map(toLab);
+export function getLabResultsForPatient(patientId: string, orgId?: string): LabResult[] {
+  const rows = orgId
+    ? (getDb()
+        .prepare("SELECT * FROM lab_results WHERE patient_id = ? AND organization_id = ? ORDER BY date DESC")
+        .all(patientId, orgId) as Row[])
+    : (getDb()
+        .prepare("SELECT * FROM lab_results WHERE patient_id = ? ORDER BY date DESC")
+        .all(patientId) as Row[]);
+  return rows.map(toLab);
 }
 
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------
 
-export function bookSlot(args: { patientId: string; slotId: string; reason: string }): Appointment {
+export function bookSlot(args: {
+  organizationId: string;
+  patientId: string;
+  slotId: string;
+  reason: string;
+}): Appointment {
   const db = getDb();
-  const tx = db.transaction(() => {
+  return db.transaction(() => {
     const slot = getSlot(args.slotId);
     if (!slot) throw new Error(`El horario ${args.slotId} no existe.`);
     if (slot.taken) throw new Error(`El horario ${args.slotId} ya está ocupado.`);
     db.prepare("UPDATE slots SET taken = 1 WHERE id = ?").run(args.slotId);
-    const id = `apt_${randomUUID().slice(0, 8)}`;
+    const id = uid("apt");
     db.prepare(
-      `INSERT INTO appointments (id, patient_id, provider_id, start, duration_minutes, reason, status, created_via)
-       VALUES (?, ?, ?, ?, ?, ?, 'scheduled', 'agent')`,
-    ).run(id, args.patientId, slot.providerId, slot.start, slot.durationMinutes, args.reason);
+      `INSERT INTO appointments (id, organization_id, patient_id, provider_id, start, duration_minutes, reason, status, created_via)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', 'agent')`,
+    ).run(id, args.organizationId, args.patientId, slot.providerId, slot.start, slot.durationMinutes, args.reason);
     return getAppointment(id)!;
-  });
-  return tx();
+  })();
 }
 
 export function cancelAppointmentById(id: string): Appointment {
@@ -448,29 +578,28 @@ export function cancelAppointmentById(id: string): Appointment {
   const apt = getAppointment(id);
   if (!apt) throw new Error(`El turno ${id} no existe.`);
   db.prepare("UPDATE appointments SET status = 'cancelled' WHERE id = ?").run(id);
-  db.prepare("UPDATE slots SET taken = 0 WHERE provider_id = ? AND start = ?").run(
-    apt.providerId,
-    apt.start,
-  );
+  db.prepare("UPDATE slots SET taken = 0 WHERE provider_id = ? AND start = ?").run(apt.providerId, apt.start);
   return getAppointment(id)!;
 }
 
 export function createPrescriptionRequest(args: {
+  organizationId: string;
   patientId: string;
   medication: string;
   decision: "approved" | "denied";
   decidedBy?: string;
   note?: string;
 }): PrescriptionRequest {
-  const id = `rx_${randomUUID().slice(0, 8)}`;
+  const id = uid("rx");
   const requestedAt = new Date().toISOString();
   getDb()
     .prepare(
-      `INSERT INTO prescription_requests (id, patient_id, medication, requested_at, status, decided_by, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO prescription_requests (id, organization_id, patient_id, medication, requested_at, status, decided_by, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
+      args.organizationId,
       args.patientId,
       args.medication,
       requestedAt,
@@ -489,12 +618,12 @@ export function createPrescriptionRequest(args: {
   };
 }
 
-export function recordPatientMessage(patientId: string, body: string): PatientMessage {
-  const id = `msg_${randomUUID().slice(0, 8)}`;
+export function recordPatientMessage(orgId: string, patientId: string, body: string): PatientMessage {
+  const id = uid("msg");
   const sentAt = new Date().toISOString();
   getDb()
-    .prepare("INSERT INTO patient_messages (id, patient_id, body, sent_at) VALUES (?, ?, ?, ?)")
-    .run(id, patientId, body, sentAt);
+    .prepare("INSERT INTO patient_messages (id, organization_id, patient_id, body, sent_at) VALUES (?, ?, ?, ?, ?)")
+    .run(id, orgId, patientId, body, sentAt);
   return { id, patientId, body, sentAt };
 }
 
@@ -521,22 +650,20 @@ export function setProviderFee(providerId: string, amount: number): void {
   getDb().prepare("UPDATE providers SET default_fee = ? WHERE id = ?").run(Math.round(amount), providerId);
 }
 
-export function addProviderPrice(providerId: string, label: string, amount: number): PriceItem {
-  const id = `price_${randomUUID().slice(0, 8)}`;
+export function addProviderPrice(orgId: string, providerId: string, label: string, amount: number): PriceItem {
+  const id = uid("price");
   getDb()
-    .prepare("INSERT INTO provider_prices (id, provider_id, label, amount) VALUES (?, ?, ?, ?)")
-    .run(id, providerId, label.trim(), Math.round(amount));
+    .prepare("INSERT INTO provider_prices (id, organization_id, provider_id, label, amount) VALUES (?, ?, ?, ?, ?)")
+    .run(id, orgId, providerId, label.trim(), Math.round(amount));
   return { id, label: label.trim(), amount: Math.round(amount) };
 }
 
-/** Resolve what a given reason costs for a provider: matched price item, else default fee. */
 export function priceForReason(providerId: string, reason: string): number {
   const r = reason.trim().toLowerCase();
   const match = listProviderPrices(providerId).find(
     (p) => r.includes(p.label.toLowerCase()) || p.label.toLowerCase().includes(r),
   );
-  if (match) return match.amount;
-  return getProvider(providerId)?.defaultFee ?? 0;
+  return match ? match.amount : getProvider(providerId)?.defaultFee ?? 0;
 }
 
 export function setAppointmentStatus(id: string, status: Appointment["status"]): void {
@@ -548,7 +675,7 @@ export function setAppointmentPrice(id: string, price: number): void {
 }
 
 // ---------------------------------------------------------------------------
-// Daily reports
+// Daily reports (per org)
 // ---------------------------------------------------------------------------
 
 export interface ProviderDayReport {
@@ -569,11 +696,11 @@ export interface DayReport {
   providers: ProviderDayReport[];
 }
 
-export function buildDayReport(date: string, providerId?: string): DayReport {
-  const providers = (providerId ? [getProvider(providerId)].filter(Boolean) : listProviders()) as Provider[];
+export function buildDayReport(orgId: string, date: string, providerId?: string): DayReport {
+  const providers = (providerId ? [getProvider(providerId)].filter(Boolean) : listProviders(orgId)) as Provider[];
   const rows = getDb()
-    .prepare("SELECT * FROM appointments WHERE substr(start, 1, 10) = ?")
-    .all(date) as Row[];
+    .prepare("SELECT * FROM appointments WHERE organization_id = ? AND substr(start, 1, 10) = ?")
+    .all(orgId, date) as Row[];
   const appts = rows.map(toAppointment);
 
   const perProvider: ProviderDayReport[] = providers.map((prov) => {
@@ -607,6 +734,7 @@ export function buildDayReport(date: string, providerId?: string): DayReport {
 }
 
 export function saveDailyReport(
+  orgId: string,
   date: string,
   providerId: string,
   generatedBy: string,
@@ -614,19 +742,20 @@ export function saveDailyReport(
 ): void {
   getDb()
     .prepare(
-      `INSERT OR REPLACE INTO daily_reports (date, provider_id, generated_at, generated_by, payload)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO daily_reports (organization_id, date, provider_id, generated_at, generated_by, payload)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(date, providerId, new Date().toISOString(), generatedBy, JSON.stringify(payload));
+    .run(orgId, date, providerId, new Date().toISOString(), generatedBy, JSON.stringify(payload));
 }
 
 export function getSavedDailyReport(
+  orgId: string,
   date: string,
   providerId: string,
 ): { generatedAt: string; generatedBy?: string; payload: unknown } | undefined {
   const r = getDb()
-    .prepare("SELECT * FROM daily_reports WHERE date = ? AND provider_id = ?")
-    .get(date, providerId) as Row | undefined;
+    .prepare("SELECT * FROM daily_reports WHERE organization_id = ? AND date = ? AND provider_id = ?")
+    .get(orgId, date, providerId) as Row | undefined;
   if (!r) return undefined;
   return {
     generatedAt: r.generated_at as string,
@@ -636,7 +765,7 @@ export function getSavedDailyReport(
 }
 
 // ---------------------------------------------------------------------------
-// Live agenda: running clock, start/finish a visit, delay notices
+// Live agenda
 // ---------------------------------------------------------------------------
 
 const hm = (iso: string) => iso.slice(11, 16);
@@ -674,16 +803,18 @@ export function getClinicClock(providerId: string, date: string): string {
     .get(date, providerId) as { clock?: string } | undefined;
   if (r?.clock) return r.clock;
   const c = initialClock(providerId, date);
+  const orgId = getProvider(providerId)?.organizationId ?? "";
   getDb()
-    .prepare("INSERT OR REPLACE INTO clinic_state (date, provider_id, clock) VALUES (?, ?, ?)")
-    .run(date, providerId, c);
+    .prepare("INSERT OR REPLACE INTO clinic_state (organization_id, date, provider_id, clock) VALUES (?, ?, ?, ?)")
+    .run(orgId, date, providerId, c);
   return c;
 }
 
 export function setClinicClock(providerId: string, date: string, iso: string): void {
+  const orgId = getProvider(providerId)?.organizationId ?? "";
   getDb()
-    .prepare("INSERT OR REPLACE INTO clinic_state (date, provider_id, clock) VALUES (?, ?, ?)")
-    .run(date, providerId, iso);
+    .prepare("INSERT OR REPLACE INTO clinic_state (organization_id, date, provider_id, clock) VALUES (?, ?, ?, ?)")
+    .run(orgId, date, providerId, iso);
 }
 
 export interface AgendaEntry {
@@ -692,8 +823,8 @@ export interface AgendaEntry {
   patientName: string;
   reason: string;
   status: Appointment["status"];
-  scheduled: string; // HH:MM
-  estimated: string; // HH:MM
+  scheduled: string;
+  estimated: string;
   delayMinutes: number;
   isBirthday: boolean;
 }
@@ -702,9 +833,9 @@ export interface ProviderAgenda {
   providerId: string;
   providerName: string;
   date: string;
-  clock: string; // HH:MM
+  clock: string;
   running: "en horario" | "atrasada" | "adelantada";
-  offsetMinutes: number; // + = atrasada
+  offsetMinutes: number;
   inAttention?: AgendaEntry;
   next?: AgendaEntry;
   upcoming: AgendaEntry[];
@@ -758,8 +889,7 @@ export function startAttention(appointmentId: string): Appointment {
   const a = getAppointment(appointmentId);
   if (!a) throw new Error(`El turno ${appointmentId} no existe.`);
   if (a.status !== "scheduled") throw new Error(`El turno está ${a.status}, no se puede iniciar.`);
-  const date = dayOf(a.start);
-  const clock = getClinicClock(a.providerId, date);
+  const clock = getClinicClock(a.providerId, dayOf(a.start));
   getDb()
     .prepare("UPDATE appointments SET status = 'in-progress', actual_start = ? WHERE id = ?")
     .run(clock, appointmentId);
@@ -782,30 +912,30 @@ export function finishAttention(appointmentId: string, actualMinutes?: number): 
   return getAppointment(appointmentId)!;
 }
 
-export function patientAppointmentToday(patientId: string, date: string): Appointment | undefined {
-  const r = getDb()
+/** Patient's next scheduled/in-progress appointment across the given orgs. */
+export function patientNextAppointment(patientId: string, date: string, orgIds: string[]): Appointment | undefined {
+  const rows = getDb()
     .prepare(
       `SELECT * FROM appointments
        WHERE patient_id = ? AND substr(start,1,10) = ? AND status IN ('scheduled','in-progress')
-       ORDER BY start LIMIT 1`,
+       ORDER BY start`,
     )
-    .get(patientId, date) as Row | undefined;
-  return r ? toAppointment(r) : undefined;
+    .all(patientId, date) as Row[];
+  return rows.map(toAppointment).find((a) => orgIds.includes(a.organizationId));
 }
 
 export function replacePatientNotice(
+  orgId: string,
   appointmentId: string,
   patientId: string,
   date: string,
   message: string,
 ): void {
   const db = getDb();
-  db.prepare("UPDATE patient_notices SET resolved = 1 WHERE appointment_id = ? AND resolved = 0").run(
-    appointmentId,
-  );
+  db.prepare("UPDATE patient_notices SET resolved = 1 WHERE appointment_id = ? AND resolved = 0").run(appointmentId);
   db.prepare(
-    "INSERT INTO patient_notices (id, appointment_id, patient_id, date, created_at, message, resolved) VALUES (?, ?, ?, ?, ?, ?, 0)",
-  ).run(`ntc_${randomUUID().slice(0, 8)}`, appointmentId, patientId, date, new Date().toISOString(), message);
+    "INSERT INTO patient_notices (id, organization_id, appointment_id, patient_id, date, created_at, message, resolved) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+  ).run(uid("ntc"), orgId, appointmentId, patientId, date, new Date().toISOString(), message);
 }
 
 export function listPatientNotices(
@@ -831,7 +961,6 @@ export function clearNoticesForAppointment(appointmentId: string): void {
     .run(appointmentId);
 }
 
-/** An open slot for this provider today, after the clock and before `beforeHm`. */
 export function earlierOpeningToday(
   providerId: string,
   date: string,
@@ -839,9 +968,7 @@ export function earlierOpeningToday(
 ): { slotId: string; time: string } | undefined {
   const clockHm = hm(getClinicClock(providerId, date));
   const rows = getDb()
-    .prepare(
-      "SELECT id, start FROM slots WHERE provider_id = ? AND taken = 0 AND substr(start,1,10) = ? ORDER BY start",
-    )
+    .prepare("SELECT id, start FROM slots WHERE provider_id = ? AND taken = 0 AND substr(start,1,10) = ? ORDER BY start")
     .all(providerId, date) as Row[];
   for (const r of rows) {
     const t = (r.start as string).slice(11, 16);

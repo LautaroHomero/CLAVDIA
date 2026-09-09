@@ -6,6 +6,8 @@ export type HumanRequestKind = "approval" | "input";
 export interface PendingHumanRequest {
   /** Hook token — equals the agent tool call id. */
   token: string;
+  /** The organization this request belongs to. */
+  organizationId: string;
   /** Workflow run this request belongs to. */
   runId: string;
   kind: HumanRequestKind;

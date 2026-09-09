@@ -1,4 +1,4 @@
-import { actorFromRequest } from "@/lib/auth/session";
+import { actorFromRequest } from "@/lib/auth/actor";
 
 export async function GET(req: Request) {
   const actor = actorFromRequest(req);

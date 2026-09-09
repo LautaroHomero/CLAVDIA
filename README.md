@@ -174,8 +174,19 @@ Cambiar el comportamiento del agente = editar estos `.md`. No hay recompilar.
 "profesional"). El PIN se guarda con `scrypt` + salt; la sesión es una cookie
 `HttpOnly` firmada con HMAC (`AUTH_SECRET`).
 
-**Paciente nuevo:** _"¿Sos nuevo/a? Registrate"_ → formulario (nombre, DNI, fecha
-de nacimiento, cobertura, PIN) → crea la ficha **y** el login, y entra.
+- **Profesional en varios consultorios:** si el nombre + PIN pertenece a más de
+  una organización, el login responde `{ needsOrg: true, organizations: [...] }` y
+  la UI pide **elegir con cuál entrar**. La cookie guarda ese `activeOrgId`; se
+  cambia cerrando sesión o con el selector del encabezado (`POST
+  /api/auth/switch-org`).
+- **Paciente nuevo:** _"¿Sos nuevo/a? Registrate"_ → formulario (nombre, DNI,
+  fecha de nacimiento, cobertura, **consultorio**, PIN) → crea la ficha **y** el
+  login, lo asocia a ese consultorio y entra. Si el DNI ya tenía ficha, la
+  reutiliza y solo suma la asociación.
+- **Registrar un consultorio nuevo:** _"Registrar un consultorio nuevo"_ →
+  formulario (nombre del consultorio, dirección, tu nombre, PIN) → `POST
+  /api/organizations` crea la organización **y** tu usuario de **recepción**, y
+  entra. Desde el chat, recepción da de alta a los profesionales.
 
 ### 4.2 Los tres roles
 
@@ -197,18 +208,57 @@ de nacimiento, cobertura, PIN) → crea la ficha **y** el login, y entra.
 - Chequeos por rol dentro de cada step (ej. `closeDay` y `registerProfessional`
   rechazan si `actor.role !== 'recepcion'`).
 
+### Consultorios sembrados
+
+| Consultorio | Profesionales |
+| --- | --- |
+| **Consultorio Belgrano** | Dra. Elena Ruiz (clínica), Dr. Martín Sosa (cardiología) |
+| **Centro Médico Palermo** | Dra. Elena Ruiz (clínica), Dra. Sofía Paz (dermatología), Lic. Paula Bianchi (psicología) |
+| **Clínica del Deporte** | Dr. Nicolás Ferrari (medicina del deporte) |
+
 ### Usuarios sembrados
 
-| Nombre | Perfil · profesión | PIN |
-| --- | --- | --- |
-| Dra. Elena Ruiz | profesional · Clínica Médica | `2468` |
-| Dr. Martín Sosa | profesional · Cardiología | `1357` |
-| Dra. Sofía Paz | profesional · Dermatología | `3690` |
-| Lic. Paula Bianchi | profesional · Psicología | `1470` |
-| Dr. Nicolás Ferrari | profesional · Medicina del deporte | `2580` |
-| Recepción (Sofía) | profesional · recepción | `1234` |
-| María Gómez | paciente | `1111` |
-| Jorge Fernández | paciente | `2222` |
+| Nombre | Perfil · profesión | Consultorios | PIN |
+| --- | --- | --- | --- |
+| Dra. Elena Ruiz | profesional · Clínica Médica | Belgrano **y** Palermo (elige al entrar) | `2468` |
+| Dr. Martín Sosa | profesional · Cardiología | Belgrano | `1357` |
+| Dra. Sofía Paz | profesional · Dermatología | Palermo | `3690` |
+| Lic. Paula Bianchi | profesional · Psicología | Palermo | `1470` |
+| Dr. Nicolás Ferrari | profesional · Medicina del deporte | Clínica del Deporte | `2580` |
+| Recepción Belgrano (Sofía) | recepción | Belgrano | `1234` |
+| Recepción Palermo (Diego) | recepción | Palermo | `4321` |
+| Recepción Deporte (Ana) | recepción | Clínica del Deporte | `5678` |
+| María Gómez | paciente | Belgrano **y** Palermo | `1111` |
+| Jorge Fernández | paciente | Belgrano | `2222` |
+
+Dra. Ruiz demuestra el profesional multi-consultorio; María demuestra el paciente
+que opera en varios a la vez.
+
+### 4.4 Multi-consultorio (multi-tenancy)
+
+Cada **organización** (consultorio) es un inquilino aislado. El modelo:
+
+- **`organizations`** — el consultorio (nombre, `slug`, dirección, horarios).
+- **`memberships`** (`user_id` × `organization_id`) — vincula al **staff** con una
+  organización y lleva su `role` (`medico` / `recepcion`) y, si es médico/a, su
+  `provider_id` **en esa** organización. Un mismo profesional puede tener varias.
+- **`patient_organizations`** (`patient_id` × `organization_id`) — en qué
+  consultorios está asociado un paciente.
+- **`patients`** y **`medications`** son **globales**: una persona tiene **una
+  sola ficha**, compartida entre los consultorios donde se atiende. Todo lo
+  transaccional (`providers`, `slots`, `appointments`, `invoices`,
+  `lab_results`, `pending_requests`, `clinic_state`, …) lleva `organization_id` y
+  las queries de [`repo.ts`](src/lib/db/repo.ts) filtran por él.
+
+Cómo lo ve cada rol:
+
+- **Staff** trabaja dentro de **un** consultorio activo (`actor.activeOrg`). Las
+  altas, la agenda, los precios y el reporte quedan ahí. `registerProfessional`
+  reutiliza el usuario si esa persona ya existe en otro consultorio (mismo PIN).
+- **Paciente** opera en **todos** sus consultorios a la vez (`actor.orgs`): un
+  único briefing, una única lista de turnos. `listOrganizations` /
+  `joinOrganization` para sumarse a otro; cuando una acción depende del lugar y
+  está en varios, el agente pregunta y pasa `organization`.
 
 ---
 
@@ -231,16 +281,18 @@ y los chequeos de rol.
 
 | Tool | Roles | Qué hace |
 | --- | --- | --- |
-| `getClinicInfo` | todos | Dirección, horarios, profesionales y preparación de estudios. |
-| `findPatient` | profesional, recepción | Busca por nombre / DNI / email / id. Si hay 0 o >1 coincidencias → `askHumanInput`. |
-| `getPatientBriefing` | todos | El resumen del paciente para el día. Para el rol paciente, forzado a su propio `patientId`. |
+| `getClinicInfo` | todos | Dirección, horarios, profesionales y preparación de estudios. Staff: su consultorio activo. Paciente en varios: `organization` opcional. |
+| `listOrganizations` | paciente | Lista los consultorios de la plataforma (para elegir dónde sumarse). |
+| `joinOrganization` | paciente | Asocia al paciente a otro consultorio; después puede sacar turno ahí. |
+| `findPatient` | profesional, recepción | Busca por nombre / DNI / email / id **dentro del consultorio activo**. Si hay 0 o >1 coincidencias → `askHumanInput`. |
+| `getPatientBriefing` | todos | El resumen del paciente para el día. Para el rol paciente, forzado a su propio `patientId` y abarca todos sus consultorios. |
 
 ### 5.3 Turnos
 
 | Tool | Roles | Qué hace | Aprobación |
 | --- | --- | --- | --- |
-| `listAvailableSlots` | todos | Horarios libres (filtros: fecha, profesional). | — |
-| `scheduleAppointment` | todos | Agenda un turno en un horario libre. Le calcula y guarda el `price` (matchea el motivo contra las prácticas del profesional, si no usa la consulta estándar). | Sobreturno / urgencia / fuera de horario → sí. |
+| `listAvailableSlots` | todos | Horarios libres (filtros: fecha, profesional). Paciente en varios consultorios: `organization` opcional. | — |
+| `scheduleAppointment` | todos | Agenda un turno en un horario libre. Le calcula y guarda el `price` (matchea el motivo contra las prácticas del profesional, si no usa la consulta estándar). Staff: consultorio activo; paciente: `organization` opcional (y lo asocia si hace falta). | Sobreturno / urgencia / fuera de horario → sí. |
 | `cancelAppointment` | todos | Cancela un turno; **libera el slot** y, si es de hoy, avisa a los que esperan que quedó un lugar más temprano. | < 24 h o estudio caro → sí. |
 | `rescheduleAppointment` | todos | Cancela + reagenda a otro slot; conserva `price`; reavisa a los que esperan. | Mismas reglas que cancelar. |
 | `listMyAgenda` | profesional, recepción | Agenda de turnos (para el profesional, filtrada a su consultorio) con alertas por paciente (resultado pendiente, factura impaga). | — |
@@ -283,8 +335,8 @@ turno y avanza a medida que se atiende. Cada turno guarda `actual_start` /
 
 | Tool | Roles | Qué hace |
 | --- | --- | --- |
-| `registerPatient` | todos | Da de alta un paciente (nombre, DNI, fecha de nacimiento, cobertura). No duplica por DNI. Crea la ficha, no el login (eso lo hace el propio paciente desde `/login`). |
-| `registerProfessional` | **solo recepción** | Da de alta un profesional: nombre con título, especialidad, consultorio, PIN. Crea el `provider` + un login de rol `medico` + una **agenda de turnos**, y devuelve las credenciales para entregarle. |
+| `registerPatient` | profesional, recepción | Da de alta un paciente (nombre, DNI, fecha de nacimiento, cobertura) **y lo asocia al consultorio activo**. No duplica por DNI (si ya tenía ficha, solo suma la asociación). Crea la ficha, no el login (eso lo hace el propio paciente desde `/login`). |
+| `registerProfessional` | **solo recepción** | Da de alta un profesional **en el consultorio activo**: nombre con título, especialidad, consultorio, PIN. Crea el `provider` + `membership` + (si no existía) un login de rol `medico` + una **agenda de turnos**. Si esa persona ya existía en otro consultorio, reutiliza su usuario y PIN y solo lo suma a este. |
 
 ---
 
@@ -294,6 +346,11 @@ Chat con streaming (`useChat` + SSE) y, a la derecha, un **panel lateral distint
 por rol** (Tailwind v4, tokens de diseño extraídos de una referencia real:
 tinta carbón `#222832` sobre lienzo `#f0f3f5`, tarjetas blancas, tipografía
 Pretendard).
+
+El **encabezado** muestra el consultorio activo. Si el/la profesional pertenece a
+más de uno, ahí hay un **selector** que cambia de consultorio en caliente
+(`POST /api/auth/switch-org` + `router.refresh()`). Para el paciente lista los
+consultorios donde está asociado.
 
 **Profesional** — layout más ancho:
 
@@ -328,10 +385,13 @@ Se crea y siembra sola en el primer arranque. Todas las queries pasan por
 
 | Tabla | Para qué |
 | --- | --- |
-| `users` | login: nombre, rol, `pin_hash`/`pin_salt` (scrypt), `patient_id`/`provider_id`. |
-| `providers` | profesionales: nombre, especialidad, consultorio, `default_fee`. |
+| `organizations` | los consultorios (inquilinos): nombre, `slug`, dirección, horarios. |
+| `users` | login **global**: nombre (único), rol, `pin_hash`/`pin_salt` (scrypt), `patient_id`. |
+| `memberships` | staff × organización: `role` y `provider_id` en ese consultorio. Un profesional puede tener varias. |
+| `patient_organizations` | paciente × organización: en qué consultorios está asociado. |
+| `providers` | profesionales (por consultorio): nombre, especialidad, consultorio, `default_fee`. |
 | `provider_prices` | prácticas con nombre y precio, por profesional. |
-| `patients`, `medications` | fichas y medicación. |
+| `patients`, `medications` | fichas y medicación — **globales** (una ficha por persona). |
 | `slots` | grilla de horarios (09–12, cada 30', próximos días hábiles), `taken`. |
 | `appointments` | turnos: `status` (`scheduled` / `in-progress` / `completed` / `cancelled`), `price`, `actual_start`/`actual_end`. |
 | `invoices`, `lab_results` | facturación y resultados. |
@@ -340,6 +400,11 @@ Se crea y siembra sola en el primer arranque. Todas las queries pasan por
 | `daily_reports` | snapshots del cierre del día (consultorio + por profesional). |
 | `clinic_state` | el "reloj" simulado por profesional/día. |
 | `patient_notices` | los avisos de demora que se le muestran a cada paciente. |
+
+Todas las tablas transaccionales (`providers`, `slots`, `appointments`,
+`invoices`, `lab_results`, `prescription_requests`, `patient_messages`,
+`pending_requests`, `clinic_state`, `patient_notices`, `daily_reports`) llevan
+`organization_id` y las queries de `repo.ts` filtran por él.
 
 ---
 
@@ -417,9 +482,15 @@ primer arranque; para empezar de cero: `rm -rf data && npm run dev`.
 
 **Gratis, sin gastar tokens** (login y paneles):
 
-- Login profesional (`Dra. Elena Ruiz` / `2468`), PIN incorrecto (error), perfil
-  cruzado (`María Gómez` por "profesional" → rechaza).
-- "¿Sos nuevo/a? Registrate" → alta de paciente por autogestión.
+- Login profesional (`Dra. Elena Ruiz` / `2468`) → **pide elegir consultorio**
+  (Belgrano / Palermo). PIN incorrecto (error), perfil cruzado (`María Gómez` por
+  "profesional" → rechaza).
+- Con Dra. Ruiz adentro, usá el **selector de consultorio del encabezado**: la
+  agenda y el panel cambian de Belgrano a Palermo.
+- "¿Sos nuevo/a? Registrate" → alta de paciente por autogestión (elegí
+  consultorio). "Registrar un consultorio nuevo" → crea org + recepción y entra.
+- Login `María Gómez` / `1111` → *Mis turnos* muestra turnos de **Belgrano y
+  Palermo** juntos.
 - Mirá los paneles: profesional ve *Consultorio · ahora* + *Mi agenda*; paciente
   ve *Tu turno de hoy* + *Mis turnos* (solo los suyos).
 - Aprobar/rechazar en el panel **no** gasta (va directo a la API).
@@ -442,6 +513,9 @@ primer arranque; para empezar de cero: `rm -rf data && npm run dev`.
 | D1 | Dra. Ruiz `2468` | `María avisó que no viene hoy. Cancelá su turno con vos.` | `cancelAppointment` → "le avisé a Jorge que puede adelantarse". |
 | D2 | Jorge Fernández `2222` | (panel *Tu turno de hoy*) botón **Ir más temprano (HH:MM)** | `changeMyVisitTime("earlier")` → el turno pasa al hueco libre. |
 
+Para los casos B/D entrá con **Dra. Ruiz en Consultorio Belgrano** (ahí está
+sembrada la agenda en vivo con Mario 🎂, María y Jorge).
+
 Los horarios concretos dependen de la hora en que arrancaste el server (la agenda
 se siembra al *próximo* horario, +30 y +60 min). Para reiniciarla:
 `rm -rf data && npm run dev`.
@@ -455,7 +529,7 @@ src/
 ├── app/
 │   ├── page.tsx                     server: valida la sesión → /login o <ChatApp>
 │   ├── chat-app.tsx                 cliente: chat + paneles por rol
-│   ├── login/page.tsx               perfil + nombre + PIN, y alta de paciente
+│   ├── login/page.tsx               perfil + PIN, picker de consultorio, alta de paciente, alta de consultorio
 │   ├── globals.css                  tokens de diseño (Tailwind v4 @theme)
 │   └── api/
 │       ├── chat/route.ts            start(secretaryWorkflow, [messages, actor]) + stream SSE
@@ -463,8 +537,9 @@ src/
 │       ├── slack/actions/route.ts   webhook de Slack (firma verificada) → resumeHook
 │       ├── agenda/route.ts          estado vivo de la agenda (role-aware)
 │       ├── calendar/route.ts        mini-calendario (role-aware)
-│       ├── patients/route.ts        alta de paciente por autogestión (ficha + login)
-│       └── auth/{login,logout,me,users}/route.ts
+│       ├── patients/route.ts        alta de paciente por autogestión (ficha + login + join a un consultorio)
+│       ├── organizations/route.ts   GET lista pública · POST alta self-serve de consultorio + recepción
+│       └── auth/{login,logout,me,users,switch-org}/route.ts
 ├── workflows/secretary/
 │   ├── workflow.ts                  "use workflow": DurableAgent, instrucciones + activeTools + Actor por rol
 │   ├── tools.ts                     todas las tools ("use step") + TOOLS_BY_ROLE
@@ -475,10 +550,10 @@ src/
     │   ├── instructions.md          comportamiento base (texto plano)
     │   ├── instructions.ts          lo lee en un "use step" (base + roles/<role>.md)
     │   └── roles/{medico,recepcion,paciente}.md
-    ├── auth/{pin.ts,session.ts}     scrypt + cookie HMAC
+    ├── auth/{pin.ts,session.ts,actor.ts}   scrypt + cookie HMAC + hidratación del Actor (membership → activeOrg)
     ├── db/
-    │   ├── schema.ts connection.ts seed.ts slots.ts   SQLite (better-sqlite3)
-    │   └── repo.ts                  todas las queries tipadas
+    │   ├── schema.ts connection.ts seed.ts slots.ts   SQLite (better-sqlite3), multi-tenant
+    │   └── repo.ts                  todas las queries tipadas (scope por organización)
     ├── domain/{types.ts,briefing.ts,clock.ts}
     ├── approvals/{types.ts,registry.ts}   la fila pending_requests
     └── slack/{client.ts,blocks.ts}        Block Kit + verificación de firma

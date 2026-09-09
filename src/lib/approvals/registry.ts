@@ -13,6 +13,7 @@ type Row = Record<string, unknown>;
 function toPending(r: Row): PendingHumanRequest {
   return {
     token: r.token as string,
+    organizationId: r.organization_id as string,
     runId: r.run_id as string,
     kind: r.kind as PendingHumanRequest["kind"],
     action: r.action as string,
@@ -35,14 +36,15 @@ export function addPendingRequest(req: PendingHumanRequest): void {
   getDb()
     .prepare(
       `INSERT OR REPLACE INTO pending_requests
-        (token, run_id, kind, action, summary, details, risk_level, patient_name,
+        (token, organization_id, run_id, kind, action, summary, details, risk_level, patient_name,
          question, requested_by, created_at, channels, slack_channel, slack_ts, status)
        VALUES
-        (@token, @run_id, @kind, @action, @summary, @details, @risk_level, @patient_name,
+        (@token, @organization_id, @run_id, @kind, @action, @summary, @details, @risk_level, @patient_name,
          @question, @requested_by, @created_at, @channels, @slack_channel, @slack_ts, 'open')`,
     )
     .run({
       token: req.token,
+      organization_id: req.organizationId,
       run_id: req.runId,
       kind: req.kind,
       action: req.action,
@@ -66,12 +68,15 @@ export function getPendingRequest(token: string): PendingHumanRequest | undefine
   return r ? toPending(r) : undefined;
 }
 
-export function listPendingRequests(): PendingHumanRequest[] {
-  return (
-    getDb()
-      .prepare("SELECT * FROM pending_requests WHERE status = 'open' ORDER BY created_at")
-      .all() as Row[]
-  ).map(toPending);
+export function listPendingRequests(orgId?: string): PendingHumanRequest[] {
+  const rows = orgId
+    ? (getDb()
+        .prepare("SELECT * FROM pending_requests WHERE status = 'open' AND organization_id = ? ORDER BY created_at")
+        .all(orgId) as Row[])
+    : (getDb()
+        .prepare("SELECT * FROM pending_requests WHERE status = 'open' ORDER BY created_at")
+        .all() as Row[]);
+  return rows.map(toPending);
 }
 
 /** Mark a request resolved (called after the hook is resumed). */

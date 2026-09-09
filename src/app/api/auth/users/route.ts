@@ -1,13 +1,6 @@
-import { listUsers } from "@/lib/db/repo";
+import { listStaffNames } from "@/lib/db/repo";
 
-/**
- * Names shown as login hints. Only staff names are exposed; patients type their
- * own name (and their names should not be listed publicly).
- */
+/** Staff names shown as login hints (patients type their own name). */
 export async function GET() {
-  return Response.json({
-    users: listUsers()
-      .filter((u) => u.role !== "paciente")
-      .map((u) => ({ id: u.id, name: u.name, role: u.role })),
-  });
+  return Response.json({ staff: listStaffNames() });
 }

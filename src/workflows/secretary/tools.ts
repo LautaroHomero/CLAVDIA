@@ -11,24 +11,30 @@ import {
   earlierOpeningToday,
   finishAttention,
   getAppointment,
-  inProgressAppointment,
-  nextScheduledAppointment,
+  getInvoice,
+  getAppointmentsForPatient,
   getInvoicesForPatient,
   getLabResultsForPatient,
+  getOrganization,
   getPatient,
   getPatientByDni,
   getProvider,
   getSavedDailyReport,
   getSlot,
+  inProgressAppointment,
+  joinPatientOrg,
   listAppointments,
   listOpenSlots,
+  listOrganizations,
   listPatientNotices,
   listProviderPrices,
   listProviders,
-  patientAppointmentToday,
+  nextScheduledAppointment,
+  patientInOrg,
+  patientNextAppointment,
   priceForReason,
   providerAgenda,
-  providerNameTaken,
+  providerNameTakenInOrg,
   recordPatientMessage,
   refundInvoice as refundInvoiceInDb,
   replacePatientNotice,
@@ -39,36 +45,17 @@ import {
   setAppointmentStatus,
   setProviderFee,
   startAttention,
-  userNameTaken,
 } from "@/lib/db/repo";
-import { buildPatientBriefing } from "@/lib/domain/briefing";
+import type { DayReport } from "@/lib/db/repo";
 import { listPendingRequests } from "@/lib/approvals/registry";
+import { buildPatientBriefing } from "@/lib/domain/briefing";
 import { hashPin } from "@/lib/auth/pin";
 import { postText as postSlackText } from "@/lib/slack/client";
-import type { DayReport } from "@/lib/db/repo";
 import { DEMO_TODAY, DEMO_TOMORROW } from "@/lib/domain/clock";
-import type { Actor, Role } from "@/lib/domain/types";
+import type { Actor, OrgRef, Role } from "@/lib/domain/types";
 import { requestHuman } from "./request-human";
 
 const ars = (n: number) => `$${n.toLocaleString("es-AR")}`;
-
-/** Resolve which provider a pricing/report tool targets, given the caller's role. */
-function resolveProviderId(ctx: ToolCtx, ref?: string): string | { error: string } {
-  const actor = actorOf(ctx);
-  if (actor?.role === "medico" && actor.providerId) return actor.providerId; // forced to self
-  if (!ref) {
-    return { error: "Indicá de qué profesional se trata (nombre, especialidad o id como prov_sosa)." };
-  }
-  if (ref.startsWith("prov_") && getProvider(ref)) return ref;
-  const norm = ref.trim().toLowerCase();
-  const hit = listProviders().find(
-    (p) =>
-      p.name.toLowerCase().includes(norm) ||
-      norm.includes(p.name.toLowerCase()) ||
-      p.specialty.toLowerCase().includes(norm),
-  );
-  return hit ? hit.id : { error: `No encontré al profesional "${ref}".` };
-}
 
 // The agent passes `experimental_context: Actor` into every tool call.
 type ToolCtx = { toolCallId?: string; experimental_context?: unknown } | undefined;
@@ -78,25 +65,113 @@ function actorOf(ctx: ToolCtx): Actor | undefined {
   return a && typeof a === "object" && "role" in a ? a : undefined;
 }
 
-/** Patients may only ever act on their own record. */
+/** Staff's active organization id (undefined for patients). */
+const staffOrgId = (ctx: ToolCtx) => actorOf(ctx)?.activeOrg?.id;
+const staffProviderId = (ctx: ToolCtx) => actorOf(ctx)?.activeOrg?.providerId;
+const patientOrgIds = (ctx: ToolCtx) => actorOf(ctx)?.orgs.map((o) => o.id) ?? [];
+
+/** Patients may only act on their own record. */
 function scopePatientId(ctx: ToolCtx, requested: string): string {
   const actor = actorOf(ctx);
-  if (actor?.role === "paciente" && actor.patientId) return actor.patientId;
-  return requested;
+  return actor?.role === "paciente" && actor.patientId ? actor.patientId : requested;
+}
+
+/** Resolve which provider (in the staff's active org) a pricing/report tool targets. */
+function resolveProviderId(ctx: ToolCtx, ref?: string): string | { error: string } {
+  const actor = actorOf(ctx);
+  if (actor?.role === "medico" && actor.activeOrg?.providerId) return actor.activeOrg.providerId;
+  const orgId = staffOrgId(ctx);
+  if (!orgId) return { error: "Sin organización activa." };
+  if (!ref) return { error: "Indicá de qué profesional se trata (nombre o especialidad)." };
+  if (ref.startsWith("prov_") && getProvider(ref)?.organizationId === orgId) return ref;
+  const n = ref.trim().toLowerCase();
+  const hit = listProviders(orgId).find(
+    (p) =>
+      p.name.toLowerCase().includes(n) || n.includes(p.name.toLowerCase()) || p.specialty.toLowerCase().includes(n),
+  );
+  return hit ? hit.id : { error: `No encontré al profesional "${ref}" en ${actor?.activeOrg?.name}.` };
+}
+
+/** Resolve which of the patient's organizations an action targets. */
+function resolvePatientOrg(ctx: ToolCtx, ref?: string): OrgRef | { error: string } {
+  const orgs = actorOf(ctx)?.orgs ?? [];
+  if (orgs.length === 0)
+    return { error: "No estás registrado en ningún consultorio. Usá listOrganizations y joinOrganization." };
+  if (!ref) {
+    return orgs.length === 1
+      ? orgs[0]
+      : { error: `Indicá en qué consultorio: ${orgs.map((o) => o.name).join(" / ")}.` };
+  }
+  const n = ref.trim().toLowerCase();
+  const hit = orgs.find((o) => o.name.toLowerCase().includes(n) || n.includes(o.name.toLowerCase()) || o.id === ref);
+  return hit ?? { error: `No estás registrado en "${ref}". Tus consultorios: ${orgs.map((o) => o.name).join(", ")}.` };
 }
 
 // ---------------------------------------------------------------------------
-// Domain steps ("use step" => durable, retried, isolated)
+// Organizations
 // ---------------------------------------------------------------------------
 
-async function clinicInfoStep() {
+async function listOrganizationsStep() {
   "use step";
   return {
-    name: "Consultorio Médico Belgrano",
-    address: "Av. Cabildo 2200, piso 3, CABA",
-    hours: "Lunes a viernes de 8:00 a 18:00",
-    phone: "+54 11 4788-0000",
-    providers: listProviders().map((p) => ({ id: p.id, name: p.name, specialty: p.specialty })),
+    organizations: listOrganizations().map((o) => ({ id: o.id, name: o.name, address: o.address })),
+    note: "Para atenderte en uno nuevo, usá joinOrganization con el nombre.",
+  };
+}
+
+async function joinOrganizationStep({ organization }: { organization: string }, ctx: ToolCtx) {
+  "use step";
+  const actor = actorOf(ctx);
+  if (actor?.role !== "paciente" || !actor.patientId) {
+    return { ok: false, error: "Solo un paciente puede sumarse a un consultorio." };
+  }
+  const n = organization.trim().toLowerCase();
+  const org = listOrganizations().find(
+    (o) => o.name.toLowerCase().includes(n) || n.includes(o.name.toLowerCase()) || o.id === organization,
+  );
+  if (!org) {
+    return {
+      ok: false,
+      error: `No encontré "${organization}". Opciones: ${listOrganizations().map((o) => o.name).join(", ")}.`,
+    };
+  }
+  if (patientInOrg(actor.patientId, org.id)) {
+    return { ok: true, message: `Ya estabas registrado en ${org.name}.` };
+  }
+  joinPatientOrg(actor.patientId, org.id);
+  return { ok: true, organizationId: org.id, message: `Listo, ahora también te atendés en ${org.name}.` };
+}
+
+// ---------------------------------------------------------------------------
+// Clinic info / patients
+// ---------------------------------------------------------------------------
+
+async function clinicInfoStep({ organization }: { organization?: string }, ctx: ToolCtx) {
+  "use step";
+  const actor = actorOf(ctx);
+  let orgId: string | undefined;
+  if (actor?.role === "paciente") {
+    const r = resolvePatientOrg(ctx, organization);
+    if ("error" in r) {
+      return {
+        ok: false,
+        error: r.error,
+        tusConsultorios: (actor.orgs ?? []).map((o) => o.name),
+      };
+    }
+    orgId = r.id;
+  } else {
+    orgId = staffOrgId(ctx);
+  }
+  if (!orgId) return { ok: false, error: "Sin organización." };
+  const org = getOrganization(orgId)!;
+  return {
+    ok: true,
+    name: org.name,
+    address: org.address,
+    hours: org.hours,
+    phone: org.phone,
+    providers: listProviders(orgId).map((p) => ({ id: p.id, name: p.name, specialty: p.specialty })),
     prep: {
       laboratorio: "Ayuno de 8 horas. Se puede tomar agua.",
       resonancia: "Traer estudios previos. Avisar si tiene marcapasos o prótesis metálicas.",
@@ -105,40 +180,49 @@ async function clinicInfoStep() {
   };
 }
 
-async function registerPatientStep({
-  fullName,
-  dni,
-  dateOfBirth,
-  coverage,
-  phone,
-  email,
-  reason,
-}: {
-  fullName: string;
-  dni: string;
-  dateOfBirth: string;
-  coverage: string;
-  phone?: string;
-  email?: string;
-  reason?: string;
-}) {
+async function registerPatientStep(
+  {
+    fullName,
+    dni,
+    dateOfBirth,
+    coverage,
+    phone,
+    email,
+    reason,
+  }: {
+    fullName: string;
+    dni: string;
+    dateOfBirth: string;
+    coverage: string;
+    phone?: string;
+    email?: string;
+    reason?: string;
+  },
+  ctx: ToolCtx,
+) {
   "use step";
+  const orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización activa." };
+  const orgName = actorOf(ctx)?.activeOrg?.name ?? "este consultorio";
+
   const existing = getPatientByDni(dni);
   if (existing) {
+    joinPatientOrg(existing.id, orgId);
     return {
-      ok: false,
-      alreadyExists: true,
+      ok: true,
       patientId: existing.id,
-      message: `Ya hay un paciente con DNI ${dni}: ${existing.fullName} (${existing.id}). No lo dupliques.`,
+      alreadyExisted: true,
+      message: `${existing.fullName} (DNI ${dni}) ya tenía ficha; lo/la sumé a ${orgName}.`,
     };
   }
   const patient = createPatient({ fullName, dni, dateOfBirth, coverage, phone, email, notes: reason });
+  joinPatientOrg(patient.id, orgId);
   return {
     ok: true,
     patientId: patient.id,
     fullName: patient.fullName,
     dni: patient.dni,
-    message: "Paciente dado de alta. Para acceso al portal, el paciente se registra desde la pantalla de login.",
+    message: `Paciente dado de alta en ${orgName}. Para acceso al portal, se registra desde la pantalla de ingreso.`,
   };
 }
 
@@ -155,14 +239,17 @@ async function registerProfessionalStep(
   if (actorOf(ctx)?.role !== "recepcion") {
     return { ok: false, error: "Solo recepción puede dar de alta profesionales." };
   }
+  const orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización activa." };
   if (!/^\d{4}$/.test(pin ?? "")) {
     return { ok: false, error: "Pedí un PIN de 4 dígitos para el acceso del profesional." };
   }
-  if (providerNameTaken(fullName) || userNameTaken(fullName)) {
-    return { ok: false, error: `Ya existe un profesional o usuario llamado "${fullName}".` };
+  if (providerNameTakenInOrg(orgId, fullName)) {
+    return { ok: false, error: `Ya hay un profesional llamado "${fullName}" en este consultorio.` };
   }
   const { hash, salt } = hashPin(pin);
-  const { provider } = createProfessional({
+  const { provider, reusedUser } = createProfessional({
+    organizationId: orgId,
     name: fullName,
     specialty,
     roomLabel: roomLabel?.trim() || "A confirmar",
@@ -175,15 +262,20 @@ async function registerProfessionalStep(
     name: provider.name,
     specialty: provider.specialty,
     roomLabel: provider.roomLabel,
-    access: { nombre: provider.name, pin },
-    message:
-      "Profesional dado de alta con agenda disponible. Pasale su nombre y PIN para que ingrese como 'profesional'.",
+    access: reusedUser
+      ? { nombre: provider.name, pin: "el que ya usa (ya tenía cuenta en otro consultorio)" }
+      : { nombre: provider.name, pin },
+    message: reusedUser
+      ? "El profesional ya tenía cuenta; lo sumé a este consultorio con agenda propia."
+      : "Profesional dado de alta con agenda disponible. Pasale su nombre y PIN para que ingrese como 'profesional'.",
   };
 }
 
-async function findPatientStep({ query }: { query: string }) {
+async function findPatientStep({ query }: { query: string }, ctx: ToolCtx) {
   "use step";
-  const matches = searchPatients(query);
+  const orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización activa." };
+  const matches = searchPatients(orgId, query);
   return {
     count: matches.length,
     matches: matches.map((p) => ({
@@ -198,14 +290,33 @@ async function findPatientStep({ query }: { query: string }) {
 
 async function patientBriefingStep({ patientId }: { patientId: string }, ctx: ToolCtx) {
   "use step";
-  return buildPatientBriefing(scopePatientId(ctx, patientId));
+  const actor = actorOf(ctx);
+  const pid = scopePatientId(ctx, patientId);
+  const orgId = actor?.role === "paciente" ? undefined : staffOrgId(ctx);
+  if (actor?.role !== "paciente" && orgId && !patientInOrg(pid, orgId)) {
+    return { found: false, summary: "Ese paciente no está registrado en este consultorio." };
+  }
+  return buildPatientBriefing(pid, orgId);
 }
 
-async function availableSlotsStep({ date, providerId }: { date?: string; providerId?: string }) {
+async function availableSlotsStep(
+  { date, providerId, organization }: { date?: string; providerId?: string; organization?: string },
+  ctx: ToolCtx,
+) {
   "use step";
-  const slots = listOpenSlots({ date, providerId }).slice(0, 20);
+  const actor = actorOf(ctx);
+  let orgId: string | undefined;
+  if (actor?.role === "paciente") {
+    const r = resolvePatientOrg(ctx, organization);
+    if ("error" in r) return { ok: false, error: r.error };
+    orgId = r.id;
+  } else orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización." };
+
+  const slots = listOpenSlots(orgId, { date, providerId }).slice(0, 20);
   return {
     today: DEMO_TODAY,
+    organization: getOrganization(orgId)?.name,
     count: slots.length,
     slots: slots.map((s) => {
       const provider = getProvider(s.providerId);
@@ -222,22 +333,22 @@ async function availableSlotsStep({ date, providerId }: { date?: string; provide
 
 async function myAgendaStep({ date }: { date?: string }, ctx: ToolCtx) {
   "use step";
-  const actor = actorOf(ctx);
-  const providerId = actor?.role === "medico" ? actor.providerId : undefined;
-  const appts = listAppointments({ providerId, date });
+  const orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización activa." };
+  const providerId = staffProviderId(ctx);
+  const appts = listAppointments(orgId, { providerId, date });
   const prov = providerId ? getProvider(providerId) : undefined;
   return {
     today: DEMO_TODAY,
     tomorrow: DEMO_TOMORROW,
+    organization: actorOf(ctx)?.activeOrg?.name,
     queriedDate: date ?? "todas las fechas",
     count: appts.length,
     scope: prov ? `${prov.name} · ${prov.specialty}` : "todo el consultorio",
     appointments: appts.map((a) => {
       const patient = getPatient(a.patientId);
-      const pendingLabs = getLabResultsForPatient(a.patientId).filter(
-        (l) => l.status === "pending-review",
-      );
-      const unpaid = getInvoicesForPatient(a.patientId).filter((i) => i.status === "unpaid");
+      const pendingLabs = getLabResultsForPatient(a.patientId, orgId).filter((l) => l.status === "pending-review");
+      const unpaid = getInvoicesForPatient(a.patientId, orgId).filter((i) => i.status === "unpaid");
       return {
         appointmentId: a.id,
         start: a.start.replace("T", " "),
@@ -247,16 +358,16 @@ async function myAgendaStep({ date }: { date?: string }, ctx: ToolCtx) {
         provider: getProvider(a.providerId)?.name,
         flags: [
           ...pendingLabs.map((l) => `Resultado pendiente: ${l.panel}`),
-          ...unpaid.map((i) => `Factura impaga: ${i.concept} ($${i.amount.toLocaleString("es-AR")})`),
+          ...unpaid.map((i) => `Factura impaga: ${i.concept} (${ars(i.amount)})`),
         ],
       };
     }),
   };
 }
 
-async function pendingApprovalsStep() {
+async function pendingApprovalsStep(_input: unknown, ctx: ToolCtx) {
   "use step";
-  const items = listPendingRequests();
+  const items = listPendingRequests(staffOrgId(ctx));
   return {
     count: items.length,
     note: "La decisión se toma desde el panel o desde Slack, no desde el chat.",
@@ -273,24 +384,47 @@ async function pendingApprovalsStep() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Appointments
+// ---------------------------------------------------------------------------
+
 async function scheduleAppointmentStep(
-  { patientId, slotId, reason }: { patientId: string; slotId: string; reason: string },
+  {
+    patientId,
+    slotId,
+    reason,
+    organization,
+  }: { patientId: string; slotId: string; reason: string; organization?: string },
   ctx: ToolCtx,
 ) {
   "use step";
+  const actor = actorOf(ctx);
+  let orgId: string | undefined;
+  if (actor?.role === "paciente") {
+    const r = resolvePatientOrg(ctx, organization);
+    if ("error" in r) return { ok: false, error: r.error };
+    orgId = r.id;
+  } else orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización." };
+
   const pid = scopePatientId(ctx, patientId);
   if (!getPatient(pid)) return { ok: false, error: `Paciente ${pid} no existe.` };
+  if (!patientInOrg(pid, orgId)) {
+    if (actor?.role === "paciente") joinPatientOrg(pid, orgId);
+    else return { ok: false, error: "Ese paciente no está registrado en este consultorio." };
+  }
   const slot = getSlot(slotId);
   if (!slot) return { ok: false, error: `El horario ${slotId} no existe.` };
   if (slot.taken) return { ok: false, error: `El horario ${slotId} ya fue tomado.` };
   try {
-    const apt = bookSlot({ patientId: pid, slotId, reason });
+    const apt = bookSlot({ organizationId: orgId, patientId: pid, slotId, reason });
     const price = priceForReason(apt.providerId, reason);
     setAppointmentPrice(apt.id, price);
     return {
       ok: true,
       appointmentId: apt.id,
       start: apt.start.replace("T", " "),
+      organization: getOrganization(orgId)?.name,
       provider: getProvider(apt.providerId)?.name,
       reason: apt.reason,
       price,
@@ -300,51 +434,55 @@ async function scheduleAppointmentStep(
   }
 }
 
-async function cancelAppointmentStep(
-  { appointmentId }: { appointmentId: string; reason: string },
-  ctx: ToolCtx,
-) {
+async function cancelAppointmentStep({ appointmentId }: { appointmentId: string; reason: string }, ctx: ToolCtx) {
   "use step";
+  const actor = actorOf(ctx);
   const existing = getAppointment(appointmentId);
   if (!existing) return { ok: false, error: `El turno ${appointmentId} no existe.` };
-  const actor = actorOf(ctx);
   if (actor?.role === "paciente" && actor.patientId && existing.patientId !== actor.patientId) {
     return { ok: false, error: "Ese turno no pertenece a tu ficha." };
+  }
+  if (actor?.role !== "paciente" && staffOrgId(ctx) !== existing.organizationId) {
+    return { ok: false, error: "Ese turno es de otro consultorio." };
   }
   if (existing.status !== "scheduled")
     return { ok: false, error: `El turno ${appointmentId} está ${existing.status}.` };
   const apt = cancelAppointmentById(appointmentId);
   clearNoticesForAppointment(appointmentId);
-  // Frees the slot → tell the patients still waiting today that there's an opening.
-  const avisos =
-    existing.start.startsWith(DEMO_TODAY) ? refreshWaitingNotices(existing.providerId) : [];
+  const avisos = existing.start.startsWith(DEMO_TODAY)
+    ? refreshWaitingNotices(existing.organizationId, existing.providerId)
+    : [];
   return { ok: true, appointmentId: apt.id, status: apt.status, avisosEnviados: avisos };
 }
 
 async function rescheduleAppointmentStep(
-  {
-    appointmentId,
-    newSlotId,
-  }: { appointmentId: string; newSlotId: string; reason: string },
+  { appointmentId, newSlotId }: { appointmentId: string; newSlotId: string; reason: string },
   ctx: ToolCtx,
 ) {
   "use step";
+  const actor = actorOf(ctx);
   const existing = getAppointment(appointmentId);
   if (!existing) return { ok: false, error: `El turno ${appointmentId} no existe.` };
-  const actor = actorOf(ctx);
   if (actor?.role === "paciente" && actor.patientId && existing.patientId !== actor.patientId) {
     return { ok: false, error: "Ese turno no pertenece a tu ficha." };
   }
+  if (actor?.role !== "paciente" && staffOrgId(ctx) !== existing.organizationId) {
+    return { ok: false, error: "Ese turno es de otro consultorio." };
+  }
   const slot = getSlot(newSlotId);
-  if (!slot || slot.taken)
-    return { ok: false, error: `El nuevo horario ${newSlotId} no está disponible.` };
+  if (!slot || slot.taken) return { ok: false, error: `El nuevo horario ${newSlotId} no está disponible.` };
   cancelAppointmentById(appointmentId);
   clearNoticesForAppointment(appointmentId);
-  const apt = bookSlot({ patientId: existing.patientId, slotId: newSlotId, reason: existing.reason });
+  const apt = bookSlot({
+    organizationId: existing.organizationId,
+    patientId: existing.patientId,
+    slotId: newSlotId,
+    reason: existing.reason,
+  });
   setAppointmentPrice(apt.id, existing.price || priceForReason(apt.providerId, existing.reason));
   const avisos =
     existing.start.startsWith(DEMO_TODAY) || apt.start.startsWith(DEMO_TODAY)
-      ? refreshWaitingNotices(existing.providerId)
+      ? refreshWaitingNotices(existing.organizationId, existing.providerId)
       : [];
   return {
     ok: true,
@@ -355,20 +493,21 @@ async function rescheduleAppointmentStep(
   };
 }
 
-async function prescriptionRenewalStep({
-  patientId,
-  medication,
-  approvedBy,
-  note,
-}: {
-  patientId: string;
-  medication: string;
-  approvedBy: string;
-  note?: string;
-}) {
+async function prescriptionRenewalStep(
+  {
+    patientId,
+    medication,
+    approvedBy,
+    note,
+  }: { patientId: string; medication: string; approvedBy: string; note?: string },
+  ctx: ToolCtx,
+) {
   "use step";
+  const orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización activa." };
   if (!getPatient(patientId)) return { ok: false, error: `Paciente ${patientId} no existe.` };
   const req = createPrescriptionRequest({
+    organizationId: orgId,
     patientId,
     medication,
     decision: "approved",
@@ -378,31 +517,31 @@ async function prescriptionRenewalStep({
   return { ok: true, prescriptionRequestId: req.id, medication: req.medication, status: req.status };
 }
 
-async function sendPatientMessageStep({
-  patientId,
-  message,
-}: {
-  patientId: string;
-  message: string;
-}) {
+async function sendPatientMessageStep(
+  { patientId, message }: { patientId: string; message: string },
+  ctx: ToolCtx,
+) {
   "use step";
+  const orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización activa." };
   if (!getPatient(patientId)) return { ok: false, error: `Paciente ${patientId} no existe.` };
-  const msg = recordPatientMessage(patientId, message);
+  const msg = recordPatientMessage(orgId, patientId, message);
   return { ok: true, messageId: msg.id, sentAt: msg.sentAt };
 }
 
-async function refundInvoiceStep({
-  invoiceId,
-  approvedBy,
-}: {
-  invoiceId: string;
-  reason: string;
-  approvedBy: string;
-}) {
+async function refundInvoiceStep(
+  { invoiceId, approvedBy }: { invoiceId: string; reason: string; approvedBy: string },
+  ctx: ToolCtx,
+) {
   "use step";
+  const inv = getInvoice(invoiceId);
+  if (!inv) return { ok: false, error: `La factura ${invoiceId} no existe.` };
+  if (staffOrgId(ctx) !== inv.organizationId) {
+    return { ok: false, error: "Esa factura es de otro consultorio." };
+  }
   try {
-    const inv = refundInvoiceInDb(invoiceId);
-    return { ok: true, invoiceId: inv.id, status: inv.status, amount: inv.amount, approvedBy };
+    const done = refundInvoiceInDb(invoiceId);
+    return { ok: true, invoiceId: done.id, status: done.status, amount: done.amount, approvedBy };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -427,10 +566,7 @@ async function listPricesStep({ provider }: { provider?: string }, ctx: ToolCtx)
   };
 }
 
-async function setConsultationFeeStep(
-  { provider, amount }: { provider?: string; amount: number },
-  ctx: ToolCtx,
-) {
+async function setConsultationFeeStep({ provider, amount }: { provider?: string; amount: number }, ctx: ToolCtx) {
   "use step";
   const pid = resolveProviderId(ctx, provider);
   if (typeof pid !== "string") return { ok: false, error: pid.error };
@@ -448,7 +584,8 @@ async function addPriceItemStep(
   if (typeof pid !== "string") return { ok: false, error: pid.error };
   if (!label?.trim()) return { ok: false, error: "Falta el nombre de la práctica." };
   if (!Number.isFinite(amount) || amount <= 0) return { ok: false, error: "Importe inválido." };
-  const item = addProviderPrice(pid, label, amount);
+  const orgId = getProvider(pid)!.organizationId;
+  const item = addProviderPrice(orgId, pid, label, amount);
   return { ok: true, professional: getProvider(pid)!.name, added: item };
 }
 
@@ -457,7 +594,10 @@ async function markAttendedStep({ appointmentId }: { appointmentId: string }, ct
   const apt = getAppointment(appointmentId);
   if (!apt) return { ok: false, error: `El turno ${appointmentId} no existe.` };
   const actor = actorOf(ctx);
-  if (actor?.role === "medico" && actor.providerId && apt.providerId !== actor.providerId) {
+  if (actor?.role !== "paciente" && staffOrgId(ctx) !== apt.organizationId) {
+    return { ok: false, error: "Ese turno es de otro consultorio." };
+  }
+  if (actor?.role === "medico" && staffProviderId(ctx) && apt.providerId !== staffProviderId(ctx)) {
     return { ok: false, error: "Ese turno no es de tu agenda." };
   }
   if (apt.status === "cancelled") return { ok: false, error: "El turno está cancelado." };
@@ -488,19 +628,22 @@ function reportSummary(r: DayReport): Record<string, unknown> {
 
 async function dailyReportStep({ date, provider }: { date?: string; provider?: string }, ctx: ToolCtx) {
   "use step";
+  const orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización activa." };
   const day = date?.trim() || DEMO_TODAY;
   const actor = actorOf(ctx);
   let providerId: string | undefined;
-  if (actor?.role === "medico") providerId = actor.providerId;
+  if (actor?.role === "medico") providerId = staffProviderId(ctx);
   else if (provider) {
     const r = resolveProviderId(ctx, provider);
     if (typeof r !== "string") return { ok: false, error: r.error };
     providerId = r;
   }
-  const report = buildDayReport(day, providerId);
-  const saved = getSavedDailyReport(day, providerId ?? "");
+  const report = buildDayReport(orgId, day, providerId);
+  const saved = getSavedDailyReport(orgId, day, providerId ?? "");
   return {
     ok: true,
+    organization: actor?.activeOrg?.name,
     ...reportSummary(report),
     cierreOficial: saved ? `hecho por ${saved.generatedBy} el ${saved.generatedAt}` : "todavía no se cerró el día",
   };
@@ -511,50 +654,46 @@ async function closeDayStep({ date }: { date?: string }, ctx: ToolCtx) {
   if (actorOf(ctx)?.role !== "recepcion") {
     return { ok: false, error: "El cierre del día lo hace recepción." };
   }
+  const orgId = staffOrgId(ctx);
+  if (!orgId) return { ok: false, error: "Sin organización activa." };
   const day = date?.trim() || DEMO_TODAY;
   const by = actorOf(ctx)?.name ?? "Recepción";
-  const clinic = buildDayReport(day);
+  const orgName = actorOf(ctx)?.activeOrg?.name ?? "el consultorio";
+  const clinic = buildDayReport(orgId, day);
 
-  saveDailyReport(day, "", by, clinic);
+  saveDailyReport(orgId, day, "", by, clinic);
   for (const p of clinic.providers) {
-    saveDailyReport(day, p.providerId, by, buildDayReport(day, p.providerId));
+    saveDailyReport(orgId, day, p.providerId, by, buildDayReport(orgId, day, p.providerId));
   }
 
   const lines = [
-    `*Cierre del día ${day}*`,
+    `*Cierre del día ${day} — ${orgName}*`,
     `Atendidos: ${clinic.totalAttended} · Recaudado: ${ars(clinic.clinicRevenue)}`,
     "",
     ...clinic.providers
       .filter((p) => p.attendedCount + p.cancelledCount > 0)
       .map(
-        (p) =>
-          `• ${p.providerName} (${p.specialty}): ${p.attendedCount} atendidos, ${p.cancelledCount} cancelados — ${ars(p.revenue)}`,
+        (p) => `• ${p.providerName} (${p.specialty}): ${p.attendedCount} atendidos, ${p.cancelledCount} cancelados — ${ars(p.revenue)}`,
       ),
   ];
   const slackPosted = await postSlackText(lines.join("\n"));
-
   return { ok: true, ...reportSummary(clinic), slackPosted };
 }
 
 // ---------------------------------------------------------------------------
-// Live agenda (running late / ahead, pre-visit briefing, patient notices)
+// Live agenda
 // ---------------------------------------------------------------------------
 
-const toMin = (hm: string) => Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3, 5));
+const toMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 const fromMin = (m: number) =>
   `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 
-/**
- * Refresh the notice for every waiting patient after the agenda changes
- * (a visit started/ended, or a turn was freed by a cancellation).
- */
-function refreshWaitingNotices(providerId: string): { patient: string; message: string }[] {
+function refreshWaitingNotices(orgId: string, providerId: string): { patient: string; message: string }[] {
   const agenda = providerAgenda(providerId, DEMO_TODAY);
   const out: { patient: string; message: string }[] = [];
   for (const e of [...(agenda.next ? [agenda.next] : []), ...agenda.upcoming]) {
     const earlier = earlierOpeningToday(providerId, DEMO_TODAY, e.estimated);
     let msg: string | null = null;
-
     if (e.delayMinutes >= 10) {
       msg =
         `Se demoró un turno anterior. Tu cita de las ${e.scheduled} se estima ahora ~${e.estimated} ` +
@@ -565,9 +704,8 @@ function refreshWaitingNotices(providerId: string): { patient: string; message: 
         `Se liberó un turno más temprano con ${agenda.providerName}: hay lugar ${earlier.time} ` +
         `(el tuyo es ${e.scheduled}). Si te sirve, podés adelantarte.`;
     }
-
     if (msg) {
-      replacePatientNotice(e.appointmentId, e.patientId, DEMO_TODAY, msg);
+      replacePatientNotice(orgId, e.appointmentId, e.patientId, DEMO_TODAY, msg);
       out.push({ patient: e.patientName, message: msg });
     } else {
       clearNoticesForAppointment(e.appointmentId);
@@ -576,19 +714,26 @@ function refreshWaitingNotices(providerId: string): { patient: string; message: 
   return out;
 }
 
-/**
- * Tentative heads-up while still attending: tells the patients that follow that
- * a delay is likely (unlike refreshWaitingNotices, which reacts to a confirmed
- * offset after a visit starts/ends).
- */
+function agendaSummary(a: ReturnType<typeof providerAgenda>) {
+  return {
+    reloj: a.clock,
+    marcha: a.running,
+    desfasajeMin: a.offsetMinutes,
+    atendidosHoy: a.attendedToday,
+    enEspera: [...(a.next ? [a.next] : []), ...a.upcoming].map(
+      (e) => `${e.scheduled}→~${e.estimated} ${e.patientName} (${e.reason})`,
+    ),
+  };
+}
+
 async function warnDelayStep(
   { extraMinutes, reason }: { extraMinutes?: number; reason?: string },
   ctx: ToolCtx,
 ) {
   "use step";
-  const actor = actorOf(ctx);
-  const providerId = actor?.role === "medico" ? actor.providerId : undefined;
-  if (!providerId) {
+  const orgId = staffOrgId(ctx);
+  const providerId = staffProviderId(ctx);
+  if (!orgId || !providerId) {
     return { ok: false, error: "Esta herramienta es para el profesional (se demora en su consulta)." };
   }
   const extra = Math.max(5, Math.round(extraMinutes ?? 15));
@@ -605,7 +750,7 @@ async function warnDelayStep(
       `El/la profesional se está demorando${because}. Tu turno de las ${e.scheduled} ` +
       `podría correrse ~${extra} min (estimado ~${est}). Te confirmamos apenas se libere; ` +
       `si preferís, podés venir más tarde.`;
-    replacePatientNotice(e.appointmentId, e.patientId, DEMO_TODAY, msg);
+    replacePatientNotice(orgId, e.appointmentId, e.patientId, DEMO_TODAY, msg);
     out.push({ patient: e.patientName, message: msg });
   }
   return { ok: true, extraMinutes: extra, avisosEnviados: out };
@@ -613,16 +758,16 @@ async function warnDelayStep(
 
 async function nextPatientStep(_input: unknown, ctx: ToolCtx) {
   "use step";
-  const actor = actorOf(ctx);
-  const providerId = actor?.role === "medico" ? actor.providerId : undefined;
-  if (!providerId) return { ok: false, error: "Esta herramienta es para el profesional." };
+  const orgId = staffOrgId(ctx);
+  const providerId = staffProviderId(ctx);
+  if (!orgId || !providerId) return { ok: false, error: "Esta herramienta es para el profesional." };
 
   const agenda = providerAgenda(providerId, DEMO_TODAY);
   const target = agenda.inAttention ?? agenda.next;
   if (!target) {
     return { ok: true, message: "No quedan pacientes en la agenda de hoy.", agenda: agendaSummary(agenda) };
   }
-  const briefing = buildPatientBriefing(target.patientId);
+  const briefing = buildPatientBriefing(target.patientId, orgId);
   return {
     ok: true,
     estado: agenda.inAttention ? "en atención" : "próximo",
@@ -639,40 +784,23 @@ async function nextPatientStep(_input: unknown, ctx: ToolCtx) {
   };
 }
 
-function agendaSummary(a: ReturnType<typeof providerAgenda>) {
-  return {
-    reloj: a.clock,
-    marcha: a.running,
-    desfasajeMin: a.offsetMinutes,
-    atendidosHoy: a.attendedToday,
-    enEspera: [...(a.next ? [a.next] : []), ...a.upcoming].map(
-      (e) => `${e.scheduled}→~${e.estimated} ${e.patientName} (${e.reason})`,
-    ),
-  };
-}
-
 async function startAttentionStep({ appointmentId }: { appointmentId?: string }, ctx: ToolCtx) {
   "use step";
-  const actor = actorOf(ctx);
-  const provId = actor?.role === "medico" ? actor.providerId : undefined;
+  const provId = staffProviderId(ctx);
   const a = appointmentId
     ? getAppointment(appointmentId)
     : provId
       ? nextScheduledAppointment(provId, DEMO_TODAY)
       : undefined;
   if (!a) return { ok: false, error: "No encontré el turno a iniciar." };
-  appointmentId = a.id;
-  if (actor?.role === "medico" && actor.providerId && a.providerId !== actor.providerId) {
-    return { ok: false, error: "Ese turno no es de tu agenda." };
-  }
+  if (provId && a.providerId !== provId) return { ok: false, error: "Ese turno no es de tu agenda." };
   try {
-    const started = startAttention(appointmentId);
-    const notified = refreshWaitingNotices(a.providerId);
-    const agenda = providerAgenda(a.providerId, DEMO_TODAY);
+    const started = startAttention(a.id);
+    const notified = refreshWaitingNotices(a.organizationId, a.providerId);
     return {
       ok: true,
       enAtencion: getPatient(started.patientId)?.fullName,
-      agenda: agendaSummary(agenda),
+      agenda: agendaSummary(providerAgenda(a.providerId, DEMO_TODAY)),
       avisosEnviados: notified,
     };
   } catch (err) {
@@ -681,26 +809,21 @@ async function startAttentionStep({ appointmentId }: { appointmentId?: string },
 }
 
 async function finishAttentionStep(
-  { appointmentId, actualMinutes, note }: { appointmentId?: string; actualMinutes?: number; note?: string },
+  { appointmentId, actualMinutes }: { appointmentId?: string; actualMinutes?: number; note?: string },
   ctx: ToolCtx,
 ) {
   "use step";
-  const actor = actorOf(ctx);
-  const provId = actor?.role === "medico" ? actor.providerId : undefined;
+  const provId = staffProviderId(ctx);
   const a = appointmentId
     ? getAppointment(appointmentId)
     : provId
       ? inProgressAppointment(provId, DEMO_TODAY)
       : undefined;
   if (!a) return { ok: false, error: "No hay ninguna atención en curso para cerrar." };
-  appointmentId = a.id;
-  if (actor?.role === "medico" && actor.providerId && a.providerId !== actor.providerId) {
-    return { ok: false, error: "Ese turno no es de tu agenda." };
-  }
-  void note;
+  if (provId && a.providerId !== provId) return { ok: false, error: "Ese turno no es de tu agenda." };
   try {
-    finishAttention(appointmentId, actualMinutes);
-    const notified = refreshWaitingNotices(a.providerId);
+    finishAttention(a.id, actualMinutes);
+    const notified = refreshWaitingNotices(a.organizationId, a.providerId);
     const agenda = providerAgenda(a.providerId, DEMO_TODAY);
     return {
       ok: true,
@@ -723,11 +846,10 @@ async function myVisitStatusStep(_input: unknown, ctx: ToolCtx) {
   if (actor?.role !== "paciente" || !actor.patientId) {
     return { ok: false, error: "Esta herramienta es para el paciente." };
   }
-  const appt = patientAppointmentToday(actor.patientId, DEMO_TODAY);
+  const appt = patientNextAppointment(actor.patientId, DEMO_TODAY, patientOrgIds(ctx));
   const notices = listPatientNotices(actor.patientId, DEMO_TODAY).map((n) => n.message);
-  if (!appt) {
-    return { ok: true, tenesTurnoHoy: false, avisos: notices };
-  }
+  if (!appt) return { ok: true, tenesTurnoHoy: false, avisos: notices };
+
   const agenda = providerAgenda(appt.providerId, DEMO_TODAY);
   const entry =
     [agenda.inAttention, agenda.next, ...agenda.upcoming].find((e) => e?.appointmentId === appt.id) ?? null;
@@ -735,6 +857,7 @@ async function myVisitStatusStep(_input: unknown, ctx: ToolCtx) {
   return {
     ok: true,
     tenesTurnoHoy: true,
+    consultorio: getOrganization(appt.organizationId)?.name,
     profesional: agenda.providerName,
     motivo: appt.reason,
     programado: entry?.scheduled,
@@ -746,16 +869,13 @@ async function myVisitStatusStep(_input: unknown, ctx: ToolCtx) {
   };
 }
 
-async function changeMyVisitTimeStep(
-  { direction }: { direction: "later" | "earlier" },
-  ctx: ToolCtx,
-) {
+async function changeMyVisitTimeStep({ direction }: { direction: "later" | "earlier" }, ctx: ToolCtx) {
   "use step";
   const actor = actorOf(ctx);
   if (actor?.role !== "paciente" || !actor.patientId) {
     return { ok: false, error: "Esta herramienta es para el paciente." };
   }
-  const appt = patientAppointmentToday(actor.patientId, DEMO_TODAY);
+  const appt = patientNextAppointment(actor.patientId, DEMO_TODAY, patientOrgIds(ctx));
   if (!appt) return { ok: false, error: "No tenés un turno hoy." };
   const agenda = providerAgenda(appt.providerId, DEMO_TODAY);
   const entry = [agenda.next, ...agenda.upcoming].find((e) => e?.appointmentId === appt.id) ?? null;
@@ -770,11 +890,14 @@ async function changeMyVisitTimeStep(
   }
 
   const opening = earlierOpeningToday(appt.providerId, DEMO_TODAY, entry?.estimated ?? entry?.scheduled ?? "23:59");
-  if (!opening) {
-    return { ok: true, accion: "sin-lugar-antes", mensaje: "Por ahora no hay lugar para adelantarte." };
-  }
+  if (!opening) return { ok: true, accion: "sin-lugar-antes", mensaje: "Por ahora no hay lugar para adelantarte." };
   cancelAppointmentById(appt.id);
-  const moved = bookSlot({ patientId: appt.patientId, slotId: opening.slotId, reason: appt.reason });
+  const moved = bookSlot({
+    organizationId: appt.organizationId,
+    patientId: appt.patientId,
+    slotId: opening.slotId,
+    reason: appt.reason,
+  });
   setAppointmentPrice(moved.id, appt.price || priceForReason(moved.providerId, appt.reason));
   listPatientNotices(actor.patientId, DEMO_TODAY).forEach((n) => resolvePatientNotice(n.id));
   return {
@@ -791,23 +914,35 @@ async function changeMyVisitTimeStep(
 // ---------------------------------------------------------------------------
 
 export const secretaryTools = {
+  listOrganizations: {
+    description:
+      "Para el PACIENTE: lista los consultorios donde puede atenderse. Para sumarse a uno nuevo, usá joinOrganization.",
+    inputSchema: z.object({}),
+    execute: listOrganizationsStep,
+  },
+  joinOrganization: {
+    description: "Para el PACIENTE: se suma a un consultorio (por nombre) para poder pedir turnos ahí.",
+    inputSchema: z.object({ organization: z.string() }),
+    execute: joinOrganizationStep,
+  },
+
   getClinicInfo: {
     description:
-      "Datos del consultorio: dirección, horarios, profesionales y preparación de estudios. No requiere aprobación.",
-    inputSchema: z.object({}),
+      "Datos del consultorio (dirección, horarios, profesionales, preparación de estudios). El paciente puede indicar cuál con `organization` si está en varios.",
+    inputSchema: z.object({ organization: z.string().optional() }),
     execute: clinicInfoStep,
   },
 
   findPatient: {
     description:
-      "Busca pacientes por nombre, DNI, email o id. Si hay 0 o más de 1 coincidencia, no adivines: usá askHumanInput.",
+      "Busca pacientes de ESTE consultorio por nombre, DNI, email o id. Si hay 0 o más de 1 coincidencia, no adivines: usá askHumanInput.",
     inputSchema: z.object({ query: z.string().describe("Nombre, DNI, email o id") }),
     execute: findPatientStep,
   },
 
   registerPatient: {
     description:
-      "Da de alta un paciente nuevo. Lo pueden hacer médico/a, recepción o el propio paciente (por ejemplo para un familiar). Antes de llamarlo, pedí: nombre y apellido, DNI, fecha de nacimiento (AAAA-MM-DD) y cobertura; teléfono y email son opcionales. Si ya existe alguien con ese DNI, no dupliques: informá el patientId que devuelve.",
+      "Da de alta un paciente en ESTE consultorio (médico/a o recepción). Pedí antes: nombre y apellido, DNI, fecha de nacimiento (AAAA-MM-DD) y cobertura. Si ya existe alguien con ese DNI, no dupliques: se lo suma a este consultorio.",
     inputSchema: z.object({
       fullName: z.string(),
       dni: z.string(),
@@ -815,60 +950,62 @@ export const secretaryTools = {
       coverage: z.string().describe("Obra social o prepaga"),
       phone: z.string().optional(),
       email: z.string().optional(),
-      reason: z.string().optional().describe("Motivo del alta / nota interna"),
+      reason: z.string().optional(),
     }),
     execute: registerPatientStep,
   },
 
   registerProfessional: {
     description:
-      "Da de alta un profesional nuevo (con su especialidad y una agenda de turnos). SOLO puede hacerlo recepción. Pedí antes: nombre completo con título (ej. 'Dra. Laura Gómez'), especialidad/profesión (ej. Dermatología, Psicología, Medicina del deporte), consultorio (opcional) y un PIN de 4 dígitos para su acceso. Devuelve el nombre y PIN para entregarle al profesional.",
+      "Da de alta un profesional en ESTE consultorio (SOLO recepción): nombre con título, especialidad, consultorio (opcional) y un PIN de 4 dígitos. Si esa persona ya es profesional en otro consultorio, se la suma acá con agenda propia.",
     inputSchema: z.object({
-      fullName: z.string().describe("Nombre con título, ej. 'Dr. Juan Pérez'"),
-      specialty: z.string().describe("Especialidad o profesión"),
-      roomLabel: z.string().optional().describe("Consultorio, ej. 'Consultorio 6'"),
-      pin: z.string().describe("PIN de 4 dígitos para el login del profesional"),
+      fullName: z.string().describe("Nombre con título, ej. 'Dra. Laura Gómez'"),
+      specialty: z.string(),
+      roomLabel: z.string().optional(),
+      pin: z.string().describe("PIN de 4 dígitos"),
     }),
     execute: registerProfessionalStep,
   },
 
   getPatientBriefing: {
     description:
-      "Compila el resumen previo del paciente (antecedentes, alergias, medicación, próximos turnos, pendientes). Llamalo SIEMPRE apenas identifiques al paciente, antes de cualquier otra acción.",
+      "Resumen del paciente para este consultorio (antecedentes, alergias, medicación, próximos turnos, pendientes). Llamalo SIEMPRE apenas identifiques al paciente.",
     inputSchema: z.object({ patientId: z.string() }),
     execute: patientBriefingStep,
   },
 
   listMyAgenda: {
     description:
-      "Agenda de turnos. Para el rol médico/a viene filtrada por su consultorio; para recepción muestra todos. Incluye alertas por paciente (resultados pendientes, facturas impagas). Filtro opcional por fecha YYYY-MM-DD.",
+      "Agenda de turnos de ESTE consultorio. Para el rol médico/a viene filtrada a su agenda. Incluye alertas por paciente. Filtro opcional por fecha YYYY-MM-DD.",
     inputSchema: z.object({ date: z.string().optional() }),
     execute: myAgendaStep,
   },
 
   listPendingApprovals: {
-    description:
-      "Lista los pedidos human-in-the-loop en espera (bandeja de aprobaciones). Solo lectura: la aprobación/rechazo se hace desde el panel o Slack, no desde el chat.",
+    description: "Bandeja de pedidos human-in-the-loop en espera de ESTE consultorio. Solo lectura.",
     inputSchema: z.object({}),
     execute: pendingApprovalsStep,
   },
 
   listAvailableSlots: {
-    description: "Horarios de turno disponibles. Filtros opcionales: date (YYYY-MM-DD), providerId.",
+    description:
+      "Horarios de turno disponibles. El paciente puede indicar el consultorio con `organization`. Filtros: date (YYYY-MM-DD), providerId.",
     inputSchema: z.object({
       date: z.string().optional(),
-      providerId: z.string().optional().describe("ej. prov_ruiz"),
+      providerId: z.string().optional(),
+      organization: z.string().optional(),
     }),
     execute: availableSlotsStep,
   },
 
   scheduleAppointment: {
     description:
-      "Agenda un turno en un horario libre. Turno común en horario de atención: directo. Sobreturno / urgencia / fuera de horario: pedí antes requestHumanApproval.",
+      "Agenda un turno en un horario libre. El paciente puede indicar `organization` si está en varios. Sobreturno / urgencia / fuera de horario: pedí antes requestHumanApproval.",
     inputSchema: z.object({
       patientId: z.string(),
       slotId: z.string(),
       reason: z.string(),
+      organization: z.string().optional(),
     }),
     execute: scheduleAppointmentStep,
   },
@@ -881,19 +1018,14 @@ export const secretaryTools = {
   },
 
   rescheduleAppointment: {
-    description:
-      "Reprograma un turno a un nuevo horario. Mismas reglas de aprobación que cancelAppointment.",
-    inputSchema: z.object({
-      appointmentId: z.string(),
-      newSlotId: z.string(),
-      reason: z.string(),
-    }),
+    description: "Reprograma un turno a un nuevo horario. Mismas reglas de aprobación que cancelAppointment.",
+    inputSchema: z.object({ appointmentId: z.string(), newSlotId: z.string(), reason: z.string() }),
     execute: rescheduleAppointmentStep,
   },
 
   createPrescriptionRenewal: {
     description:
-      "Registra una renovación de receta YA APROBADA por el médico. Recepción y paciente: obtené primero la aprobación con requestHumanApproval. Médico/a: puede llamarlo directo para sus pacientes. Pasá en approvedBy quién la aprobó.",
+      "Registra una renovación de receta YA APROBADA. Recepción/paciente: obtené primero la aprobación. Médico/a: directo para sus pacientes. Pasá en approvedBy quién la aprobó.",
     inputSchema: z.object({
       patientId: z.string(),
       medication: z.string(),
@@ -905,7 +1037,7 @@ export const secretaryTools = {
 
   sendPatientMessage: {
     description:
-      "Envía un mensaje al paciente. Recordatorios/avisos administrativos: directo. Si incluye resultados o datos clínicos: pedí antes requestHumanApproval.",
+      "Envía un mensaje al paciente. Recordatorios/avisos: directo. Si incluye resultados o datos clínicos: pedí antes requestHumanApproval.",
     inputSchema: z.object({ patientId: z.string(), message: z.string() }),
     execute: sendPatientMessageStep,
   },
@@ -913,88 +1045,72 @@ export const secretaryTools = {
   refundInvoice: {
     description:
       "Marca una factura como reembolsada. Recepción: requiere requestHumanApproval previo si el monto es ≥ $50.000 o el motivo no es claro. Médico/a: directo. Pasá en approvedBy quién lo aprobó.",
-    inputSchema: z.object({
-      invoiceId: z.string(),
-      reason: z.string(),
-      approvedBy: z.string(),
-    }),
+    inputSchema: z.object({ invoiceId: z.string(), reason: z.string(), approvedBy: z.string() }),
     execute: refundInvoiceStep,
   },
 
   listPrices: {
     description:
-      "Muestra los precios de un profesional: la consulta estándar y las prácticas con nombre. El rol profesional ve el suyo; recepción debe indicar de quién (nombre, especialidad o id).",
-    inputSchema: z.object({
-      provider: z.string().optional().describe("Solo recepción: nombre / especialidad / id del profesional"),
-    }),
+      "Precios de un profesional de ESTE consultorio: consulta estándar + prácticas. El profesional ve el suyo; recepción indica de quién.",
+    inputSchema: z.object({ provider: z.string().optional() }),
     execute: listPricesStep,
   },
 
   setConsultationFee: {
     description:
-      "Define el precio de la consulta estándar de un profesional. Lo puede hacer recepción (indicando el profesional) o el propio profesional (sobre sí mismo). Sin aprobación.",
-    inputSchema: z.object({
-      provider: z.string().optional(),
-      amount: z.number().describe("Importe en pesos"),
-    }),
+      "Define el precio de la consulta estándar de un profesional de ESTE consultorio. Recepción (indicando quién) o el propio profesional. Sin aprobación.",
+    inputSchema: z.object({ provider: z.string().optional(), amount: z.number() }),
     execute: setConsultationFeeStep,
   },
 
   addPriceItem: {
     description:
-      "Agrega una práctica con su precio a un profesional (ej. 'Crioterapia' $30000). Recepción o el propio profesional. Sin aprobación.",
-    inputSchema: z.object({
-      provider: z.string().optional(),
-      label: z.string().describe("Nombre de la práctica"),
-      amount: z.number().describe("Importe en pesos"),
-    }),
+      "Agrega una práctica con su precio a un profesional de ESTE consultorio (ej. 'Crioterapia' $30000). Sin aprobación.",
+    inputSchema: z.object({ provider: z.string().optional(), label: z.string(), amount: z.number() }),
     execute: addPriceItemStep,
   },
 
   markAttended: {
     description:
-      "Marca un turno como atendido (status 'completed'), lo que lo suma a la recaudación del día. Recepción, o el profesional dueño del turno.",
+      "Marca un turno como atendido (status 'completed') → suma a la recaudación del día. Recepción, o el profesional dueño del turno.",
     inputSchema: z.object({ appointmentId: z.string() }),
     execute: markAttendedStep,
   },
 
   getDailyReport: {
     description:
-      "Resumen del día: atendidos, cancelados, pendientes y recaudado. El profesional ve el suyo; recepción ve todo el consultorio (o filtra por profesional). Fecha opcional AAAA-MM-DD (default: hoy).",
-    inputSchema: z.object({
-      date: z.string().optional(),
-      provider: z.string().optional().describe("Solo recepción: filtrar por profesional"),
-    }),
+      "Resumen del día de ESTE consultorio: atendidos, cancelados, pendientes y recaudado. El profesional ve el suyo; recepción todo (o filtra por profesional). Fecha opcional.",
+    inputSchema: z.object({ date: z.string().optional(), provider: z.string().optional() }),
     execute: dailyReportStep,
   },
 
   closeDay: {
     description:
-      "Cierre del día (SOLO recepción): calcula y guarda el resumen del consultorio y el de cada profesional, y lo publica en Slack. Simula lo que en producción dispara un workflow al terminar el último turno.",
+      "Cierre del día de ESTE consultorio (SOLO recepción): calcula, guarda y publica en Slack el resumen del consultorio y de cada profesional.",
     inputSchema: z.object({ date: z.string().optional() }),
     execute: closeDayStep,
   },
 
   getNextPatient: {
     description:
-      "Para el PROFESIONAL: trae el paciente en atención o el próximo, con su resumen para hoy (incluye si cumple años), el horario programado vs. estimado, y cómo viene la agenda (en horario / atrasada / adelantada).",
+      "Para el PROFESIONAL: el paciente en atención o el próximo, con su resumen para hoy (incluye si cumple años), horario programado vs. estimado, y cómo viene la agenda.",
     inputSchema: z.object({}),
     execute: nextPatientStep,
   },
 
   startAttention: {
     description:
-      "Para el PROFESIONAL: registra que EMPEZÓ a atender a un paciente (su 'ok'). Si no pasás appointmentId, toma el próximo turno. Fija la hora real de inicio y avisa por su chat a los pacientes que siguen si la agenda se atrasó o adelantó.",
+      "Para el PROFESIONAL: registra que EMPEZÓ a atender (su 'ok'). Sin appointmentId toma el próximo. Fija la hora real y avisa a los pacientes que siguen si hay atraso/adelanto.",
     inputSchema: z.object({ appointmentId: z.string().optional() }),
     execute: startAttentionStep,
   },
 
   finishAttention: {
     description:
-      "Para el PROFESIONAL: registra que TERMINÓ de atender. Si no pasás appointmentId, cierra la atención en curso. Pasá `actualMinutes` si duró distinto a lo previsto (ej. hizo una práctica y tardó 50'). Recalcula la demora y reavisa a los que esperan; deja listo el resumen del siguiente.",
+      "Para el PROFESIONAL: registra que TERMINÓ. Sin appointmentId cierra la atención en curso. Pasá `actualMinutes` si duró distinto. Recalcula la demora y reavisa; deja listo el resumen del siguiente.",
     inputSchema: z.object({
       appointmentId: z.string().optional(),
-      actualMinutes: z.number().optional().describe("Duración real en minutos"),
+      actualMinutes: z.number().optional(),
       note: z.string().optional(),
     }),
     execute: finishAttentionStep,
@@ -1002,38 +1118,31 @@ export const secretaryTools = {
 
   warnDelay: {
     description:
-      "Para el PROFESIONAL: mientras todavía está atendiendo, avisa a los pacientes que siguen que PUEDE haber una demora (aviso tentativo). Usalo si la consulta se está estirando o surgió algo. `extraMinutes` opcional (default 15), `reason` opcional.",
-    inputSchema: z.object({
-      extraMinutes: z.number().optional().describe("Cuántos minutos estimás de más"),
-      reason: z.string().optional(),
-    }),
+      "Para el PROFESIONAL: mientras todavía atiende, avisa a los que siguen que PUEDE haber demora (tentativo). `extraMinutes` opcional (default 15), `reason` opcional.",
+    inputSchema: z.object({ extraMinutes: z.number().optional(), reason: z.string().optional() }),
     execute: warnDelayStep,
   },
 
   getMyVisitStatus: {
     description:
-      "Para el PACIENTE: estado de su turno de hoy — horario programado, estimado ahora, demora, cómo viene la agenda, si hay lugar para ir antes, y los avisos que le mandó el consultorio.",
+      "Para el PACIENTE: estado de su próximo turno de hoy (en cualquiera de sus consultorios) — programado, estimado, demora, si hay lugar antes, y los avisos del consultorio.",
     inputSchema: z.object({}),
     execute: myVisitStatusStep,
   },
 
   changeMyVisitTime: {
     description:
-      "Para el PACIENTE: 'later' = confirma que viene más tarde por la demora (no reagenda, solo lo tranquiliza). 'earlier' = si hay un hueco antes con el mismo profesional hoy, adelanta el turno.",
+      "Para el PACIENTE: 'later' = confirma que viene más tarde por la demora (no reagenda). 'earlier' = si hay un hueco antes con el mismo profesional hoy, adelanta el turno.",
     inputSchema: z.object({ direction: z.enum(["later", "earlier"]) }),
     execute: changeMyVisitTimeStep,
   },
 
   requestHumanApproval: {
     description:
-      "Pausa el flujo y pide APROBACIÓN a una persona (Slack y/o panel de la app). Devuelve { approved, note, respondedBy, timedOut }.",
+      "Pausa el flujo y pide APROBACIÓN a una persona (Slack y/o panel). Devuelve { approved, note, respondedBy, timedOut }.",
     inputSchema: z.object({
-      action: z.string().describe("Etiqueta corta, ej. 'Renovación de receta'"),
-      summary: z
-        .string()
-        .describe(
-          "Contexto completo para decidir sin repreguntar: paciente + DNI, qué se pide, datos del briefing, importe si aplica, y tu recomendación.",
-        ),
+      action: z.string(),
+      summary: z.string(),
       riskLevel: z.enum(["bajo", "medio", "alto"]).optional(),
       patientName: z.string().optional(),
       details: z.string().optional(),
@@ -1048,8 +1157,10 @@ export const secretaryTools = {
       },
       ctx: ToolCtx,
     ) => {
+      const orgId = staffOrgId(ctx) ?? actorOf(ctx)?.orgs[0]?.id ?? "";
       const res = await requestHuman({
         token: ctx?.toolCallId ?? `approval_${Date.now()}`,
+        organizationId: orgId,
         kind: "approval",
         action: input.action,
         summary: input.summary,
@@ -1069,18 +1180,17 @@ export const secretaryTools = {
 
   askHumanInput: {
     description:
-      "Pausa el flujo y pide ACLARACIÓN a una persona cuando no podés avanzar responsablemente (identidad ambigua, intención poco clara, falta un dato). Devuelve { answer, respondedBy, timedOut }.",
+      "Pausa el flujo y pide ACLARACIÓN a una persona (identidad ambigua, dato faltante, intención poco clara). Devuelve { answer, respondedBy, timedOut }.",
     inputSchema: z.object({
       question: z.string(),
       context: z.string(),
       patientName: z.string().optional(),
     }),
-    execute: async (
-      input: { question: string; context: string; patientName?: string },
-      ctx: ToolCtx,
-    ) => {
+    execute: async (input: { question: string; context: string; patientName?: string }, ctx: ToolCtx) => {
+      const orgId = staffOrgId(ctx) ?? actorOf(ctx)?.orgs[0]?.id ?? "";
       const res = await requestHuman({
         token: ctx?.toolCallId ?? `input_${Date.now()}`,
+        organizationId: orgId,
         kind: "input",
         action: "Aclaración",
         summary: `${input.question}\n\n_Contexto:_ ${input.context}`,
@@ -1088,11 +1198,7 @@ export const secretaryTools = {
         patientName: input.patientName,
         requestedBy: actorOf(ctx)?.name,
       });
-      return {
-        answer: res.answer ?? "",
-        respondedBy: res.respondedBy,
-        timedOut: res.timedOut ?? false,
-      };
+      return { answer: res.answer ?? "", respondedBy: res.respondedBy, timedOut: res.timedOut ?? false };
     },
   },
 };
@@ -1105,7 +1211,6 @@ const COMMON = [
   "getClinicInfo",
   "getPatientBriefing",
   "listAvailableSlots",
-  "registerPatient",
   "requestHumanApproval",
   "askHumanInput",
 ] as const;
@@ -1114,6 +1219,7 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
   medico: [
     ...COMMON,
     "findPatient",
+    "registerPatient",
     "listMyAgenda",
     "listPendingApprovals",
     "getNextPatient",
@@ -1135,8 +1241,9 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
   recepcion: [
     ...COMMON,
     "findPatient",
-    "listMyAgenda",
+    "registerPatient",
     "registerProfessional",
+    "listMyAgenda",
     "getNextPatient",
     "scheduleAppointment",
     "cancelAppointment",
@@ -1153,6 +1260,8 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
   ],
   paciente: [
     ...COMMON,
+    "listOrganizations",
+    "joinOrganization",
     "getMyVisitStatus",
     "changeMyVisitTime",
     "scheduleAppointment",

@@ -1,6 +1,6 @@
 import { consumeStream, createUIMessageStreamResponse, type UIMessage } from "ai";
 import { start } from "workflow/api";
-import { actorFromRequest } from "@/lib/auth/session";
+import { actorFromRequest } from "@/lib/auth/actor";
 import { secretaryWorkflow } from "@/workflows/secretary/workflow";
 
 // The agent can pause for a human for a long time; keep the function alive.

@@ -1,19 +1,18 @@
 import { resumeHook } from "workflow/api";
 import { getPendingRequest, listPendingRequests } from "@/lib/approvals/registry";
 import type { HumanResponse } from "@/lib/approvals/types";
-import { actorFromRequest } from "@/lib/auth/session";
+import { actorFromRequest } from "@/lib/auth/actor";
 import { isSlackEnabled } from "@/lib/slack/client";
 
-/** Pending human-in-the-loop requests, scoped to the caller's role. */
+/** Pending human-in-the-loop requests, scoped to the caller's role and org. */
 export async function GET(req: Request) {
   const actor = actorFromRequest(req);
   if (!actor) return Response.json({ error: "No autenticado." }, { status: 401 });
 
-  let pending = listPendingRequests();
-  // Patients only see the requests their own chat generated.
-  if (actor.role === "paciente") {
-    pending = pending.filter((r) => r.requestedBy === actor.name);
-  }
+  let pending =
+    actor.role === "paciente"
+      ? listPendingRequests().filter((r) => r.requestedBy === actor.name)
+      : listPendingRequests(actor.activeOrg?.id);
 
   return Response.json({
     slackEnabled: isSlackEnabled(),

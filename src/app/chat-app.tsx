@@ -90,20 +90,48 @@ export function ChatApp({ actor }: { actor: Actor }) {
       }`}
     >
       <section className="flex min-h-[65vh] flex-1 flex-col overflow-hidden rounded-xl border border-hairline bg-surface shadow-card md:min-h-0">
-        <header className="flex items-center justify-between border-b border-hairline px-5 py-3.5">
-          <div className="space-y-0.5">
+        <header className="flex items-center justify-between gap-3 border-b border-hairline px-5 py-3.5">
+          <div className="min-w-0 space-y-0.5">
             <h1 className="text-[15px] font-semibold tracking-tight text-ink">CLAVDIA Secretario médico</h1>
-            <p className="text-[12px] text-muted">
-              {actor.name}
-              {actor.specialty ? ` · ${actor.specialty}` : ` · ${ROLE_LABEL[actor.role]}`}
+            <p className="truncate text-[12px] text-muted">
+              {actor.name} ·{" "}
+              {actor.role === "paciente"
+                ? "Paciente"
+                : actor.activeOrg?.specialty ?? ROLE_LABEL[actor.role]}
+              {actor.activeOrg ? ` · ${actor.activeOrg.name}` : ""}
+              {actor.role === "paciente" && actor.orgs.length
+                ? ` · ${actor.orgs.map((o) => o.name).join(", ")}`
+                : ""}
             </p>
           </div>
-          <button
-            onClick={logout}
-            className="rounded-pill border border-hairline px-3.5 py-1.5 text-[12px] font-semibold text-muted transition-colors hover:border-ink hover:text-ink"
-          >
-            Salir
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {actor.role !== "paciente" && actor.orgs.length > 1 && (
+              <select
+                value={actor.activeOrg?.id ?? ""}
+                onChange={async (e) => {
+                  await fetch("/api/auth/switch-org", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ organizationId: e.target.value }),
+                  });
+                  router.refresh();
+                }}
+                className="rounded-pill border border-hairline bg-surface px-2.5 py-1.5 text-[12px] font-medium text-ink"
+              >
+                {actor.orgs.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              onClick={logout}
+              className="rounded-pill border border-hairline px-3.5 py-1.5 text-[12px] font-semibold text-muted transition-colors hover:border-ink hover:text-ink"
+            >
+              Salir
+            </button>
+          </div>
         </header>
 
         <div ref={scrollRef} className="flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 py-6">
