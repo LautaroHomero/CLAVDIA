@@ -4,11 +4,20 @@ import { generateSlotRows } from "./slots";
 
 /** Health professionals with their own agenda. `title` is baked into `name`. */
 const SEED_PROVIDERS = [
-  { id: "prov_ruiz", name: "Dra. Elena Ruiz", specialty: "Clínica Médica", roomLabel: "Consultorio 2" },
-  { id: "prov_sosa", name: "Dr. Martín Sosa", specialty: "Cardiología", roomLabel: "Consultorio 5" },
-  { id: "prov_paz", name: "Dra. Sofía Paz", specialty: "Dermatología", roomLabel: "Consultorio 3" },
-  { id: "prov_bianchi", name: "Lic. Paula Bianchi", specialty: "Psicología", roomLabel: "Consultorio 7" },
-  { id: "prov_ferrari", name: "Dr. Nicolás Ferrari", specialty: "Medicina del deporte", roomLabel: "Consultorio 4" },
+  { id: "prov_ruiz", name: "Dra. Elena Ruiz", specialty: "Clínica Médica", roomLabel: "Consultorio 2", defaultFee: 18000 },
+  { id: "prov_sosa", name: "Dr. Martín Sosa", specialty: "Cardiología", roomLabel: "Consultorio 5", defaultFee: 30000 },
+  { id: "prov_paz", name: "Dra. Sofía Paz", specialty: "Dermatología", roomLabel: "Consultorio 3", defaultFee: 22000 },
+  { id: "prov_bianchi", name: "Lic. Paula Bianchi", specialty: "Psicología", roomLabel: "Consultorio 7", defaultFee: 15000 },
+  { id: "prov_ferrari", name: "Dr. Nicolás Ferrari", specialty: "Medicina del deporte", roomLabel: "Consultorio 4", defaultFee: 20000 },
+] as const;
+
+/** Named practices with their own price. */
+const SEED_PRICES = [
+  { providerId: "prov_sosa", label: "Consulta + ECG", amount: 42000 },
+  { providerId: "prov_sosa", label: "Holter 24 h", amount: 65000 },
+  { providerId: "prov_paz", label: "Crioterapia", amount: 30000 },
+  { providerId: "prov_paz", label: "Biopsia de piel", amount: 48000 },
+  { providerId: "prov_ferrari", label: "Evaluación funcional", amount: 35000 },
 ] as const;
 
 /** PINs are printed in the README so reviewers can log in. */
@@ -33,9 +42,14 @@ export function seedIfEmpty(db: Database): void {
 
   const tx = db.transaction(() => {
     const provider = db.prepare(
-      "INSERT INTO providers (id, name, specialty, room_label) VALUES (?, ?, ?, ?)",
+      "INSERT INTO providers (id, name, specialty, room_label, default_fee) VALUES (?, ?, ?, ?, ?)",
     );
-    for (const p of SEED_PROVIDERS) provider.run(p.id, p.name, p.specialty, p.roomLabel);
+    for (const p of SEED_PROVIDERS) provider.run(p.id, p.name, p.specialty, p.roomLabel, p.defaultFee);
+
+    const price = db.prepare(
+      "INSERT INTO provider_prices (id, provider_id, label, amount) VALUES (?, ?, ?, ?)",
+    );
+    SEED_PRICES.forEach((p, i) => price.run(`price_${i + 1}`, p.providerId, p.label, p.amount));
 
     const patient = db.prepare(`
       INSERT INTO patients (id, full_name, dni, date_of_birth, phone, email, coverage, allergies, active_conditions, notes)
@@ -105,20 +119,40 @@ export function seedIfEmpty(db: Database): void {
     for (const s of seedSlots()) slot.run(s.id, s.providerId, s.start);
 
     const appt = db.prepare(`
-      INSERT INTO appointments (id, patient_id, provider_id, start, duration_minutes, reason, status, created_via)
-      VALUES (?, ?, ?, ?, 30, ?, 'scheduled', 'front-desk')
+      INSERT INTO appointments (id, patient_id, provider_id, start, duration_minutes, reason, status, price, created_via)
+      VALUES (@id, @patient, @provider, @start, 30, @reason, @status, @price, 'front-desk')
     `);
-    appt.run("apt_1001", "pat_gomez", "prov_ruiz", "2026-09-11T09:30:00", "Control de presión arterial");
-    appt.run("apt_1002", "pat_fernandez", "prov_sosa", "2026-09-10T10:00:00", "Control de anticoagulación");
-    appt.run("apt_1003", "pat_ortiz", "prov_ruiz", "2026-09-10T09:30:00", "Chequeo anual");
-    appt.run("apt_1004", "pat_gomez_2", "prov_ruiz", "2026-09-10T11:00:00", "Control de asma");
-    // Mark the seeded appointment slots as taken.
-    db.prepare("UPDATE slots SET taken = 1 WHERE id IN (?, ?, ?, ?)").run(
-      "slot_prov_ruiz_2026-09-11_0930",
-      "slot_prov_sosa_2026-09-10_1000",
-      "slot_prov_ruiz_2026-09-10_0930",
-      "slot_prov_ruiz_2026-09-10_1100",
-    );
+    const A = (
+      id: string,
+      patient: string,
+      provider: string,
+      start: string,
+      reason: string,
+      status = "scheduled",
+      price = 0,
+    ) => appt.run({ id, patient, provider, start, reason, status, price });
+
+    // Upcoming (scheduled)
+    A("apt_1001", "pat_gomez", "prov_ruiz", "2026-09-11T09:30:00", "Control de presión arterial");
+    A("apt_1002", "pat_fernandez", "prov_sosa", "2026-09-10T10:00:00", "Control de anticoagulación");
+    A("apt_1003", "pat_ortiz", "prov_ruiz", "2026-09-10T09:30:00", "Chequeo anual");
+    A("apt_1004", "pat_gomez_2", "prov_ruiz", "2026-09-10T11:00:00", "Control de asma");
+
+    // Today (2026-09-09) — already attended, so the daily report has data
+    A("apt_0901", "pat_gomez", "prov_ruiz", "2026-09-09T09:00:00", "Consulta clínica", "completed", 18000);
+    A("apt_0902", "pat_ortiz", "prov_ruiz", "2026-09-09T09:30:00", "Consulta clínica", "completed", 18000);
+    A("apt_0903", "pat_gomez_2", "prov_ruiz", "2026-09-09T10:30:00", "Consulta clínica", "completed", 18000);
+    A("apt_0904", "pat_fernandez", "prov_sosa", "2026-09-09T10:00:00", "Consulta + ECG", "completed", 42000);
+    A("apt_0905", "pat_ortiz", "prov_sosa", "2026-09-09T11:00:00", "Consulta", "cancelled", 0);
+
+    db.prepare(
+      `UPDATE slots SET taken = 1 WHERE id IN (
+        'slot_prov_ruiz_2026-09-11_0930','slot_prov_sosa_2026-09-10_1000',
+        'slot_prov_ruiz_2026-09-10_0930','slot_prov_ruiz_2026-09-10_1100',
+        'slot_prov_ruiz_2026-09-09_0900','slot_prov_ruiz_2026-09-09_0930',
+        'slot_prov_ruiz_2026-09-09_1030','slot_prov_sosa_2026-09-09_1000'
+      )`,
+    ).run();
 
     const inv = db.prepare(
       "INSERT INTO invoices (id, patient_id, date, concept, amount, status) VALUES (?, ?, ?, ?, ?, ?)",

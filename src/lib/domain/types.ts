@@ -57,6 +57,7 @@ export interface Appointment {
   durationMinutes: number;
   reason: string;
   status: AppointmentStatus;
+  price: number; // ARS, resolved at scheduling time
   createdVia: "agent" | "front-desk";
 }
 
@@ -65,6 +66,13 @@ export interface Provider {
   name: string;
   specialty: string;
   roomLabel: string;
+  defaultFee: number; // ARS per standard consultation
+}
+
+export interface PriceItem {
+  id: string;
+  label: string;
+  amount: number;
 }
 
 export interface Slot {

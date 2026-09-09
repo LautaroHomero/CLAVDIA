@@ -38,6 +38,22 @@ export async function postHumanRequest(req: PendingHumanRequest): Promise<PostRe
   return data;
 }
 
+/** Posts a plain-text message to the approvals channel (used by the day-close summary). */
+export async function postText(text: string): Promise<boolean> {
+  if (!isSlackEnabled()) return false;
+  const res = await fetch(`${SLACK_API}/chat.postMessage`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+    },
+    body: JSON.stringify({ channel: process.env.SLACK_APPROVAL_CHANNEL, text }),
+  }).catch(() => null);
+  if (!res) return false;
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+  return Boolean(data.ok);
+}
+
 /** Rewrites the original Slack message once the request is resolved. */
 export async function updateResolvedMessage(
   req: PendingHumanRequest,

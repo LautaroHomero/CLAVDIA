@@ -4,7 +4,16 @@ CREATE TABLE IF NOT EXISTS providers (
   id          TEXT PRIMARY KEY,
   name        TEXT NOT NULL,
   specialty   TEXT NOT NULL,
-  room_label  TEXT NOT NULL
+  room_label  TEXT NOT NULL,
+  default_fee INTEGER NOT NULL DEFAULT 0
+);
+
+-- Named practice prices per professional (the default consult uses default_fee).
+CREATE TABLE IF NOT EXISTS provider_prices (
+  id          TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL REFERENCES providers(id),
+  label       TEXT NOT NULL,
+  amount      INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS patients (
@@ -44,8 +53,19 @@ CREATE TABLE IF NOT EXISTS appointments (
   start            TEXT NOT NULL,
   duration_minutes INTEGER NOT NULL,
   reason           TEXT NOT NULL,
-  status           TEXT NOT NULL DEFAULT 'scheduled',
+  status           TEXT NOT NULL DEFAULT 'scheduled', -- scheduled | completed | cancelled
+  price            INTEGER NOT NULL DEFAULT 0,
   created_via      TEXT NOT NULL DEFAULT 'front-desk'
+);
+
+-- Stored end-of-day summaries. provider_id = '' means the clinic-wide report.
+CREATE TABLE IF NOT EXISTS daily_reports (
+  date         TEXT NOT NULL,
+  provider_id  TEXT NOT NULL DEFAULT '',
+  generated_at TEXT NOT NULL,
+  generated_by TEXT,
+  payload      TEXT NOT NULL,
+  PRIMARY KEY (date, provider_id)
 );
 
 CREATE TABLE IF NOT EXISTS invoices (

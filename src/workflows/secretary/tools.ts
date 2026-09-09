@@ -1,6 +1,8 @@
 import { z } from "zod";
 import {
+  addProviderPrice,
   bookSlot,
+  buildDayReport,
   cancelAppointmentById,
   createPatient,
   createPrescriptionRequest,
@@ -11,22 +13,51 @@ import {
   getPatient,
   getPatientByDni,
   getProvider,
+  getSavedDailyReport,
   getSlot,
   listAppointments,
   listOpenSlots,
+  listProviderPrices,
   listProviders,
+  priceForReason,
   providerNameTaken,
   recordPatientMessage,
   refundInvoice as refundInvoiceInDb,
+  saveDailyReport,
   searchPatients,
+  setAppointmentPrice,
+  setAppointmentStatus,
+  setProviderFee,
   userNameTaken,
 } from "@/lib/db/repo";
 import { buildPatientBriefing } from "@/lib/domain/briefing";
 import { listPendingRequests } from "@/lib/approvals/registry";
 import { hashPin } from "@/lib/auth/pin";
+import { postText as postSlackText } from "@/lib/slack/client";
+import type { DayReport } from "@/lib/db/repo";
 import { DEMO_TODAY, DEMO_TOMORROW } from "@/lib/domain/clock";
 import type { Actor, Role } from "@/lib/domain/types";
 import { requestHuman } from "./request-human";
+
+const ars = (n: number) => `$${n.toLocaleString("es-AR")}`;
+
+/** Resolve which provider a pricing/report tool targets, given the caller's role. */
+function resolveProviderId(ctx: ToolCtx, ref?: string): string | { error: string } {
+  const actor = actorOf(ctx);
+  if (actor?.role === "medico" && actor.providerId) return actor.providerId; // forced to self
+  if (!ref) {
+    return { error: "Indicá de qué profesional se trata (nombre, especialidad o id como prov_sosa)." };
+  }
+  if (ref.startsWith("prov_") && getProvider(ref)) return ref;
+  const norm = ref.trim().toLowerCase();
+  const hit = listProviders().find(
+    (p) =>
+      p.name.toLowerCase().includes(norm) ||
+      norm.includes(p.name.toLowerCase()) ||
+      p.specialty.toLowerCase().includes(norm),
+  );
+  return hit ? hit.id : { error: `No encontré al profesional "${ref}".` };
+}
 
 // The agent passes `experimental_context: Actor` into every tool call.
 type ToolCtx = { toolCallId?: string; experimental_context?: unknown } | undefined;
@@ -243,12 +274,15 @@ async function scheduleAppointmentStep(
   if (slot.taken) return { ok: false, error: `El horario ${slotId} ya fue tomado.` };
   try {
     const apt = bookSlot({ patientId: pid, slotId, reason });
+    const price = priceForReason(apt.providerId, reason);
+    setAppointmentPrice(apt.id, price);
     return {
       ok: true,
       appointmentId: apt.id,
       start: apt.start.replace("T", " "),
       provider: getProvider(apt.providerId)?.name,
       reason: apt.reason,
+      price,
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -291,6 +325,7 @@ async function rescheduleAppointmentStep(
     return { ok: false, error: `El nuevo horario ${newSlotId} no está disponible.` };
   cancelAppointmentById(appointmentId);
   const apt = bookSlot({ patientId: existing.patientId, slotId: newSlotId, reason: existing.reason });
+  setAppointmentPrice(apt.id, existing.price || priceForReason(apt.providerId, existing.reason));
   return {
     ok: true,
     previousAppointmentId: appointmentId,
@@ -350,6 +385,134 @@ async function refundInvoiceStep({
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pricing & daily reports
+// ---------------------------------------------------------------------------
+
+async function listPricesStep({ provider }: { provider?: string }, ctx: ToolCtx) {
+  "use step";
+  const pid = resolveProviderId(ctx, provider);
+  if (typeof pid !== "string") return { ok: false, error: pid.error };
+  const p = getProvider(pid)!;
+  return {
+    ok: true,
+    providerId: pid,
+    professional: p.name,
+    specialty: p.specialty,
+    consultaEstandar: p.defaultFee,
+    practicas: listProviderPrices(pid).map((i) => ({ label: i.label, amount: i.amount })),
+  };
+}
+
+async function setConsultationFeeStep(
+  { provider, amount }: { provider?: string; amount: number },
+  ctx: ToolCtx,
+) {
+  "use step";
+  const pid = resolveProviderId(ctx, provider);
+  if (typeof pid !== "string") return { ok: false, error: pid.error };
+  if (!Number.isFinite(amount) || amount <= 0) return { ok: false, error: "Importe inválido." };
+  setProviderFee(pid, amount);
+  return { ok: true, professional: getProvider(pid)!.name, consultaEstandar: Math.round(amount) };
+}
+
+async function addPriceItemStep(
+  { provider, label, amount }: { provider?: string; label: string; amount: number },
+  ctx: ToolCtx,
+) {
+  "use step";
+  const pid = resolveProviderId(ctx, provider);
+  if (typeof pid !== "string") return { ok: false, error: pid.error };
+  if (!label?.trim()) return { ok: false, error: "Falta el nombre de la práctica." };
+  if (!Number.isFinite(amount) || amount <= 0) return { ok: false, error: "Importe inválido." };
+  const item = addProviderPrice(pid, label, amount);
+  return { ok: true, professional: getProvider(pid)!.name, added: item };
+}
+
+async function markAttendedStep({ appointmentId }: { appointmentId: string }, ctx: ToolCtx) {
+  "use step";
+  const apt = getAppointment(appointmentId);
+  if (!apt) return { ok: false, error: `El turno ${appointmentId} no existe.` };
+  const actor = actorOf(ctx);
+  if (actor?.role === "medico" && actor.providerId && apt.providerId !== actor.providerId) {
+    return { ok: false, error: "Ese turno no es de tu agenda." };
+  }
+  if (apt.status === "cancelled") return { ok: false, error: "El turno está cancelado." };
+  setAppointmentStatus(appointmentId, "completed");
+  const price = apt.price || priceForReason(apt.providerId, apt.reason);
+  if (!apt.price) setAppointmentPrice(appointmentId, price);
+  return { ok: true, appointmentId, status: "completed", price };
+}
+
+function reportSummary(r: DayReport): Record<string, unknown> {
+  return {
+    date: r.date,
+    recaudadoTotal: r.clinicRevenue,
+    atendidosTotal: r.totalAttended,
+    porProfesional: r.providers
+      .filter((p) => p.attendedCount + p.cancelledCount + p.stillScheduled > 0)
+      .map((p) => ({
+        profesional: p.providerName,
+        especialidad: p.specialty,
+        atendidos: p.attendedCount,
+        cancelados: p.cancelledCount,
+        pendientes: p.stillScheduled,
+        recaudado: p.revenue,
+        detalle: p.attended.map((a) => `${a.time} ${a.patient} — ${a.reason} (${ars(a.price)})`),
+      })),
+  };
+}
+
+async function dailyReportStep({ date, provider }: { date?: string; provider?: string }, ctx: ToolCtx) {
+  "use step";
+  const day = date?.trim() || DEMO_TODAY;
+  const actor = actorOf(ctx);
+  let providerId: string | undefined;
+  if (actor?.role === "medico") providerId = actor.providerId;
+  else if (provider) {
+    const r = resolveProviderId(ctx, provider);
+    if (typeof r !== "string") return { ok: false, error: r.error };
+    providerId = r;
+  }
+  const report = buildDayReport(day, providerId);
+  const saved = getSavedDailyReport(day, providerId ?? "");
+  return {
+    ok: true,
+    ...reportSummary(report),
+    cierreOficial: saved ? `hecho por ${saved.generatedBy} el ${saved.generatedAt}` : "todavía no se cerró el día",
+  };
+}
+
+async function closeDayStep({ date }: { date?: string }, ctx: ToolCtx) {
+  "use step";
+  if (actorOf(ctx)?.role !== "recepcion") {
+    return { ok: false, error: "El cierre del día lo hace recepción." };
+  }
+  const day = date?.trim() || DEMO_TODAY;
+  const by = actorOf(ctx)?.name ?? "Recepción";
+  const clinic = buildDayReport(day);
+
+  saveDailyReport(day, "", by, clinic);
+  for (const p of clinic.providers) {
+    saveDailyReport(day, p.providerId, by, buildDayReport(day, p.providerId));
+  }
+
+  const lines = [
+    `*Cierre del día ${day}*`,
+    `Atendidos: ${clinic.totalAttended} · Recaudado: ${ars(clinic.clinicRevenue)}`,
+    "",
+    ...clinic.providers
+      .filter((p) => p.attendedCount + p.cancelledCount > 0)
+      .map(
+        (p) =>
+          `• ${p.providerName} (${p.specialty}): ${p.attendedCount} atendidos, ${p.cancelledCount} cancelados — ${ars(p.revenue)}`,
+      ),
+  ];
+  const slackPosted = await postSlackText(lines.join("\n"));
+
+  return { ok: true, ...reportSummary(clinic), slackPosted };
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +650,60 @@ export const secretaryTools = {
     execute: refundInvoiceStep,
   },
 
+  listPrices: {
+    description:
+      "Muestra los precios de un profesional: la consulta estándar y las prácticas con nombre. El rol profesional ve el suyo; recepción debe indicar de quién (nombre, especialidad o id).",
+    inputSchema: z.object({
+      provider: z.string().optional().describe("Solo recepción: nombre / especialidad / id del profesional"),
+    }),
+    execute: listPricesStep,
+  },
+
+  setConsultationFee: {
+    description:
+      "Define el precio de la consulta estándar de un profesional. Lo puede hacer recepción (indicando el profesional) o el propio profesional (sobre sí mismo). Sin aprobación.",
+    inputSchema: z.object({
+      provider: z.string().optional(),
+      amount: z.number().describe("Importe en pesos"),
+    }),
+    execute: setConsultationFeeStep,
+  },
+
+  addPriceItem: {
+    description:
+      "Agrega una práctica con su precio a un profesional (ej. 'Crioterapia' $30000). Recepción o el propio profesional. Sin aprobación.",
+    inputSchema: z.object({
+      provider: z.string().optional(),
+      label: z.string().describe("Nombre de la práctica"),
+      amount: z.number().describe("Importe en pesos"),
+    }),
+    execute: addPriceItemStep,
+  },
+
+  markAttended: {
+    description:
+      "Marca un turno como atendido (status 'completed'), lo que lo suma a la recaudación del día. Recepción, o el profesional dueño del turno.",
+    inputSchema: z.object({ appointmentId: z.string() }),
+    execute: markAttendedStep,
+  },
+
+  getDailyReport: {
+    description:
+      "Resumen del día: atendidos, cancelados, pendientes y recaudado. El profesional ve el suyo; recepción ve todo el consultorio (o filtra por profesional). Fecha opcional AAAA-MM-DD (default: hoy).",
+    inputSchema: z.object({
+      date: z.string().optional(),
+      provider: z.string().optional().describe("Solo recepción: filtrar por profesional"),
+    }),
+    execute: dailyReportStep,
+  },
+
+  closeDay: {
+    description:
+      "Cierre del día (SOLO recepción): calcula y guarda el resumen del consultorio y el de cada profesional, y lo publica en Slack. Simula lo que en producción dispara un workflow al terminar el último turno.",
+    inputSchema: z.object({ date: z.string().optional() }),
+    execute: closeDayStep,
+  },
+
   requestHumanApproval: {
     description:
       "Pausa el flujo y pide APROBACIÓN a una persona (Slack y/o panel de la app). Devuelve { approved, note, respondedBy, timedOut }.",
@@ -582,9 +799,14 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
     "scheduleAppointment",
     "cancelAppointment",
     "rescheduleAppointment",
+    "markAttended",
     "createPrescriptionRenewal",
     "sendPatientMessage",
     "refundInvoice",
+    "listPrices",
+    "setConsultationFee",
+    "addPriceItem",
+    "getDailyReport",
   ],
   recepcion: [
     ...COMMON,
@@ -594,9 +816,15 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
     "scheduleAppointment",
     "cancelAppointment",
     "rescheduleAppointment",
+    "markAttended",
     "createPrescriptionRenewal",
     "sendPatientMessage",
     "refundInvoice",
+    "listPrices",
+    "setConsultationFee",
+    "addPriceItem",
+    "getDailyReport",
+    "closeDay",
   ],
   paciente: [
     ...COMMON,

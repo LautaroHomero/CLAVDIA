@@ -111,6 +111,9 @@ Paciente/Recepción/Médico ─► /api/chat  ─► start(secretaryWorkflow, [m
 | Briefing del paciente | `getPatientBriefing` | El agente **siempre** arranca resumiendo (antecedentes, alergias, medicación, turnos, pendientes). |
 | Alta de paciente nuevo | `registerPatient` | Cualquier rol. El agente junta nombre, DNI, fecha de nacimiento y cobertura, confirma y crea la ficha. Sin aprobación; no duplica por DNI. |
 | Alta de profesional nuevo | `registerProfessional` | **Solo recepción.** Nombre con título, especialidad, consultorio y PIN → crea el profesional + su login + su agenda. |
+| Precios por profesional | `listPrices` · `setConsultationFee` · `addPriceItem` | Cada profesional edita los suyos por chat; recepción los de cualquiera (indicando quién). Sin aprobación. El turno guarda su `price` al agendarse. |
+| Recaudación del día | `markAttended` → `getDailyReport` | `markAttended` marca el turno como atendido y lo suma a la caja. El reporte viene filtrado por rol (el profesional ve el suyo, recepción ve todo). |
+| Cierre del día | `closeDay` | **Solo recepción.** Calcula y guarda el resumen del consultorio y el de cada profesional, y lo publica en Slack. En producción lo dispararía un workflow durable al terminar el último turno. |
 | Renovación de receta | `requestHumanApproval` → `createPrescriptionRenewal` | Recepción/paciente la escalan; el/la médico/a la hace directo. |
 | Reembolso ≥ $50.000 o motivo poco claro | `requestHumanApproval` → `refundInvoice` | |
 | Cancelar/reprogramar < 24 h o estudio caro | `requestHumanApproval` → `cancelAppointment` | |
@@ -214,9 +217,9 @@ src/
     │   └── roles/{medico,recepcion,paciente}.md
     ├── auth/{pin.ts,session.ts}  scrypt + cookie HMAC
     ├── db/
-    │   ├── schema.ts  connection.ts  seed.ts   SQLite (better-sqlite3)
-    │   └── repo.ts               todas las queries tipadas
-    ├── domain/{types.ts,briefing.ts}
+    │   ├── schema.ts  connection.ts  seed.ts  slots.ts   SQLite (better-sqlite3)
+    │   └── repo.ts               queries: pacientes, turnos, precios, reportes del día
+    ├── domain/{types.ts,briefing.ts,clock.ts}
     ├── approvals/{types.ts,registry.ts}   fila HITL (tabla pending_requests)
     └── slack/{client.ts,blocks.ts}        Block Kit + verificación de firma
 ```

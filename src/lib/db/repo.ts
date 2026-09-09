@@ -7,6 +7,7 @@ import type {
   Patient,
   PatientMessage,
   PrescriptionRequest,
+  PriceItem,
   Provider,
   Role,
   Slot,
@@ -30,6 +31,7 @@ function toProvider(r: Row): Provider {
     name: r.name as string,
     specialty: r.specialty as string,
     roomLabel: r.room_label as string,
+    defaultFee: (r.default_fee as number) ?? 0,
   };
 }
 
@@ -67,6 +69,7 @@ function toAppointment(r: Row): Appointment {
     durationMinutes: r.duration_minutes as number,
     reason: r.reason as string,
     status: r.status as Appointment["status"],
+    price: (r.price as number) ?? 0,
     createdVia: r.created_via as Appointment["createdVia"],
   };
 }
@@ -459,4 +462,134 @@ export function refundInvoice(id: string): Invoice {
   if (!inv) throw new Error(`La factura ${id} no existe.`);
   getDb().prepare("UPDATE invoices SET status = 'refunded' WHERE id = ?").run(id);
   return getInvoice(id)!;
+}
+
+// ---------------------------------------------------------------------------
+// Pricing
+// ---------------------------------------------------------------------------
+
+export function listProviderPrices(providerId: string): PriceItem[] {
+  return (
+    getDb()
+      .prepare("SELECT id, label, amount FROM provider_prices WHERE provider_id = ? ORDER BY label")
+      .all(providerId) as Row[]
+  ).map((r) => ({ id: r.id as string, label: r.label as string, amount: r.amount as number }));
+}
+
+export function setProviderFee(providerId: string, amount: number): void {
+  getDb().prepare("UPDATE providers SET default_fee = ? WHERE id = ?").run(Math.round(amount), providerId);
+}
+
+export function addProviderPrice(providerId: string, label: string, amount: number): PriceItem {
+  const id = `price_${randomUUID().slice(0, 8)}`;
+  getDb()
+    .prepare("INSERT INTO provider_prices (id, provider_id, label, amount) VALUES (?, ?, ?, ?)")
+    .run(id, providerId, label.trim(), Math.round(amount));
+  return { id, label: label.trim(), amount: Math.round(amount) };
+}
+
+/** Resolve what a given reason costs for a provider: matched price item, else default fee. */
+export function priceForReason(providerId: string, reason: string): number {
+  const r = reason.trim().toLowerCase();
+  const match = listProviderPrices(providerId).find(
+    (p) => r.includes(p.label.toLowerCase()) || p.label.toLowerCase().includes(r),
+  );
+  if (match) return match.amount;
+  return getProvider(providerId)?.defaultFee ?? 0;
+}
+
+export function setAppointmentStatus(id: string, status: Appointment["status"]): void {
+  getDb().prepare("UPDATE appointments SET status = ? WHERE id = ?").run(status, id);
+}
+
+export function setAppointmentPrice(id: string, price: number): void {
+  getDb().prepare("UPDATE appointments SET price = ? WHERE id = ?").run(Math.round(price), id);
+}
+
+// ---------------------------------------------------------------------------
+// Daily reports
+// ---------------------------------------------------------------------------
+
+export interface ProviderDayReport {
+  providerId: string;
+  providerName: string;
+  specialty: string;
+  attended: { patient: string; reason: string; time: string; price: number }[];
+  attendedCount: number;
+  cancelledCount: number;
+  stillScheduled: number;
+  revenue: number;
+}
+
+export interface DayReport {
+  date: string;
+  clinicRevenue: number;
+  totalAttended: number;
+  providers: ProviderDayReport[];
+}
+
+export function buildDayReport(date: string, providerId?: string): DayReport {
+  const providers = (providerId ? [getProvider(providerId)].filter(Boolean) : listProviders()) as Provider[];
+  const rows = getDb()
+    .prepare("SELECT * FROM appointments WHERE substr(start, 1, 10) = ?")
+    .all(date) as Row[];
+  const appts = rows.map(toAppointment);
+
+  const perProvider: ProviderDayReport[] = providers.map((prov) => {
+    const mine = appts.filter((a) => a.providerId === prov.id);
+    const attended = mine.filter((a) => a.status === "completed");
+    return {
+      providerId: prov.id,
+      providerName: prov.name,
+      specialty: prov.specialty,
+      attended: attended
+        .sort((a, b) => a.start.localeCompare(b.start))
+        .map((a) => ({
+          patient: getPatient(a.patientId)?.fullName ?? a.patientId,
+          reason: a.reason,
+          time: a.start.slice(11, 16),
+          price: a.price,
+        })),
+      attendedCount: attended.length,
+      cancelledCount: mine.filter((a) => a.status === "cancelled").length,
+      stillScheduled: mine.filter((a) => a.status === "scheduled").length,
+      revenue: attended.reduce((s, a) => s + a.price, 0),
+    };
+  });
+
+  return {
+    date,
+    clinicRevenue: perProvider.reduce((s, p) => s + p.revenue, 0),
+    totalAttended: perProvider.reduce((s, p) => s + p.attendedCount, 0),
+    providers: perProvider,
+  };
+}
+
+export function saveDailyReport(
+  date: string,
+  providerId: string,
+  generatedBy: string,
+  payload: unknown,
+): void {
+  getDb()
+    .prepare(
+      `INSERT OR REPLACE INTO daily_reports (date, provider_id, generated_at, generated_by, payload)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(date, providerId, new Date().toISOString(), generatedBy, JSON.stringify(payload));
+}
+
+export function getSavedDailyReport(
+  date: string,
+  providerId: string,
+): { generatedAt: string; generatedBy?: string; payload: unknown } | undefined {
+  const r = getDb()
+    .prepare("SELECT * FROM daily_reports WHERE date = ? AND provider_id = ?")
+    .get(date, providerId) as Row | undefined;
+  if (!r) return undefined;
+  return {
+    generatedAt: r.generated_at as string,
+    generatedBy: (r.generated_by as string) ?? undefined,
+    payload: JSON.parse(r.payload as string),
+  };
 }
