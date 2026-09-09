@@ -53,7 +53,7 @@ export default function LoginPage() {
           />
           <ProfileButton
             title="Soy profesional"
-            subtitle="Médico/a o recepción"
+            subtitle="Médico/a de cualquier especialidad, psicólogo/a o recepción"
             onClick={() => {
               setKind("profesional");
               setMode("login");

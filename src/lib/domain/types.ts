@@ -22,6 +22,8 @@ export interface Actor {
   role: Role;
   patientId?: string;
   providerId?: string;
+  /** For role === "medico": the professional's specialty, e.g. "Dermatología". */
+  specialty?: string;
 }
 
 export interface Patient {

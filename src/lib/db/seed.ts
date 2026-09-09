@@ -1,39 +1,30 @@
 import type { Database } from "better-sqlite3";
 import { hashPin } from "@/lib/auth/pin";
+import { generateSlotRows } from "./slots";
+
+/** Health professionals with their own agenda. `title` is baked into `name`. */
+const SEED_PROVIDERS = [
+  { id: "prov_ruiz", name: "Dra. Elena Ruiz", specialty: "Clínica Médica", roomLabel: "Consultorio 2" },
+  { id: "prov_sosa", name: "Dr. Martín Sosa", specialty: "Cardiología", roomLabel: "Consultorio 5" },
+  { id: "prov_paz", name: "Dra. Sofía Paz", specialty: "Dermatología", roomLabel: "Consultorio 3" },
+  { id: "prov_bianchi", name: "Lic. Paula Bianchi", specialty: "Psicología", roomLabel: "Consultorio 7" },
+  { id: "prov_ferrari", name: "Dr. Nicolás Ferrari", specialty: "Medicina del deporte", roomLabel: "Consultorio 4" },
+] as const;
 
 /** PINs are printed in the README so reviewers can log in. */
 const SEED_USERS = [
   { id: "u_ruiz", name: "Dra. Elena Ruiz", role: "medico", providerId: "prov_ruiz", pin: "2468" },
   { id: "u_sosa", name: "Dr. Martín Sosa", role: "medico", providerId: "prov_sosa", pin: "1357" },
+  { id: "u_paz", name: "Dra. Sofía Paz", role: "medico", providerId: "prov_paz", pin: "3690" },
+  { id: "u_bianchi", name: "Lic. Paula Bianchi", role: "medico", providerId: "prov_bianchi", pin: "1470" },
+  { id: "u_ferrari", name: "Dr. Nicolás Ferrari", role: "medico", providerId: "prov_ferrari", pin: "2580" },
   { id: "u_recepcion", name: "Recepción (Sofía)", role: "recepcion", pin: "1234" },
   { id: "u_gomez", name: "María Gómez", role: "paciente", patientId: "pat_gomez", pin: "1111" },
   { id: "u_fernandez", name: "Jorge Fernández", role: "paciente", patientId: "pat_fernandez", pin: "2222" },
 ] as const;
 
-function pad(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
 function seedSlots(): { id: string; providerId: string; start: string }[] {
-  const out: { id: string; providerId: string; start: string }[] = [];
-  const base = new Date("2026-09-09T00:00:00");
-  for (const providerId of ["prov_ruiz", "prov_sosa"]) {
-    let added = 0;
-    let offset = 1;
-    while (added < 6) {
-      const day = new Date(base);
-      day.setDate(base.getDate() + offset++);
-      if (day.getDay() === 0 || day.getDay() === 6) continue;
-      added++;
-      const d = `${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())}`;
-      for (let h = 9; h < 12; h++) {
-        for (const m of [0, 30]) {
-          out.push({ id: `slot_${providerId}_${d}_${pad(h)}${pad(m)}`, providerId, start: `${d}T${pad(h)}:${pad(m)}:00` });
-        }
-      }
-    }
-  }
-  return out;
+  return SEED_PROVIDERS.flatMap((p) => generateSlotRows(p.id));
 }
 
 export function seedIfEmpty(db: Database): void {
@@ -44,8 +35,7 @@ export function seedIfEmpty(db: Database): void {
     const provider = db.prepare(
       "INSERT INTO providers (id, name, specialty, room_label) VALUES (?, ?, ?, ?)",
     );
-    provider.run("prov_ruiz", "Dra. Elena Ruiz", "Clínica Médica", "Consultorio 2");
-    provider.run("prov_sosa", "Dr. Martín Sosa", "Cardiología", "Consultorio 5");
+    for (const p of SEED_PROVIDERS) provider.run(p.id, p.name, p.specialty, p.roomLabel);
 
     const patient = db.prepare(`
       INSERT INTO patients (id, full_name, dni, date_of_birth, phone, email, coverage, allergies, active_conditions, notes)

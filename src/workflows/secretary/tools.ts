@@ -4,6 +4,7 @@ import {
   cancelAppointmentById,
   createPatient,
   createPrescriptionRequest,
+  createProfessional,
   getAppointment,
   getInvoicesForPatient,
   getLabResultsForPatient,
@@ -14,12 +15,15 @@ import {
   listAppointments,
   listOpenSlots,
   listProviders,
+  providerNameTaken,
   recordPatientMessage,
   refundInvoice as refundInvoiceInDb,
   searchPatients,
+  userNameTaken,
 } from "@/lib/db/repo";
 import { buildPatientBriefing } from "@/lib/domain/briefing";
 import { listPendingRequests } from "@/lib/approvals/registry";
+import { hashPin } from "@/lib/auth/pin";
 import { DEMO_TODAY, DEMO_TOMORROW } from "@/lib/domain/clock";
 import type { Actor, Role } from "@/lib/domain/types";
 import { requestHuman } from "./request-human";
@@ -96,6 +100,45 @@ async function registerPatientStep({
   };
 }
 
+async function registerProfessionalStep(
+  {
+    fullName,
+    specialty,
+    roomLabel,
+    pin,
+  }: { fullName: string; specialty: string; roomLabel?: string; pin: string },
+  ctx: ToolCtx,
+) {
+  "use step";
+  if (actorOf(ctx)?.role !== "recepcion") {
+    return { ok: false, error: "Solo recepción puede dar de alta profesionales." };
+  }
+  if (!/^\d{4}$/.test(pin ?? "")) {
+    return { ok: false, error: "Pedí un PIN de 4 dígitos para el acceso del profesional." };
+  }
+  if (providerNameTaken(fullName) || userNameTaken(fullName)) {
+    return { ok: false, error: `Ya existe un profesional o usuario llamado "${fullName}".` };
+  }
+  const { hash, salt } = hashPin(pin);
+  const { provider } = createProfessional({
+    name: fullName,
+    specialty,
+    roomLabel: roomLabel?.trim() || "A confirmar",
+    pinHash: hash,
+    pinSalt: salt,
+  });
+  return {
+    ok: true,
+    providerId: provider.id,
+    name: provider.name,
+    specialty: provider.specialty,
+    roomLabel: provider.roomLabel,
+    access: { nombre: provider.name, pin },
+    message:
+      "Profesional dado de alta con agenda disponible. Pasale su nombre y PIN para que ingrese como 'profesional'.",
+  };
+}
+
 async function findPatientStep({ query }: { query: string }) {
   "use step";
   const matches = searchPatients(query);
@@ -140,12 +183,13 @@ async function myAgendaStep({ date }: { date?: string }, ctx: ToolCtx) {
   const actor = actorOf(ctx);
   const providerId = actor?.role === "medico" ? actor.providerId : undefined;
   const appts = listAppointments({ providerId, date });
+  const prov = providerId ? getProvider(providerId) : undefined;
   return {
     today: DEMO_TODAY,
     tomorrow: DEMO_TOMORROW,
     queriedDate: date ?? "todas las fechas",
     count: appts.length,
-    scope: providerId ? getProvider(providerId)?.name : "todo el consultorio",
+    scope: prov ? `${prov.name} · ${prov.specialty}` : "todo el consultorio",
     appointments: appts.map((a) => {
       const patient = getPatient(a.patientId);
       const pendingLabs = getLabResultsForPatient(a.patientId).filter(
@@ -342,6 +386,18 @@ export const secretaryTools = {
     execute: registerPatientStep,
   },
 
+  registerProfessional: {
+    description:
+      "Da de alta un profesional nuevo (con su especialidad y una agenda de turnos). SOLO puede hacerlo recepción. Pedí antes: nombre completo con título (ej. 'Dra. Laura Gómez'), especialidad/profesión (ej. Dermatología, Psicología, Medicina del deporte), consultorio (opcional) y un PIN de 4 dígitos para su acceso. Devuelve el nombre y PIN para entregarle al profesional.",
+    inputSchema: z.object({
+      fullName: z.string().describe("Nombre con título, ej. 'Dr. Juan Pérez'"),
+      specialty: z.string().describe("Especialidad o profesión"),
+      roomLabel: z.string().optional().describe("Consultorio, ej. 'Consultorio 6'"),
+      pin: z.string().describe("PIN de 4 dígitos para el login del profesional"),
+    }),
+    execute: registerProfessionalStep,
+  },
+
   getPatientBriefing: {
     description:
       "Compila el resumen previo del paciente (antecedentes, alergias, medicación, próximos turnos, pendientes). Llamalo SIEMPRE apenas identifiques al paciente, antes de cualquier otra acción.",
@@ -534,6 +590,7 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
     ...COMMON,
     "findPatient",
     "listMyAgenda",
+    "registerProfessional",
     "scheduleAppointment",
     "cancelAppointment",
     "rescheduleAppointment",

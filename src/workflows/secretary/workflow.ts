@@ -40,9 +40,16 @@ export async function secretaryWorkflow(messages: UIMessage[], actor: Actor) {
   const writable = getWritable<UIMessageChunk>();
   const instructions = await loadAgentInstructions(actor.role);
 
+  const identity =
+    actor.role === "medico"
+      ? `\n\n## Quién sos\nHablás con **${actor.name}**${
+          actor.specialty ? `, ${actor.specialty}` : ""
+        }. "Mi agenda" / "mis pacientes" se refieren a esta persona.`
+      : "";
+
   const agent = new DurableAgent({
     model: anthropic(MODEL),
-    instructions: instructions + DATE_CONTEXT,
+    instructions: instructions + DATE_CONTEXT + identity,
     tools: secretaryTools,
   });
 

@@ -14,6 +14,7 @@ import type {
 } from "@/lib/domain/types";
 import { DEMO_TODAY } from "@/lib/domain/clock";
 import { getDb } from "./connection";
+import { generateSlotRows } from "./slots";
 
 const TODAY = DEMO_TODAY;
 
@@ -189,6 +190,42 @@ export function listProviders(): Provider[] {
 export function getProvider(id: string): Provider | undefined {
   const r = getDb().prepare("SELECT * FROM providers WHERE id = ?").get(id) as Row | undefined;
   return r ? toProvider(r) : undefined;
+}
+
+export function providerNameTaken(name: string): boolean {
+  const target = normName(name);
+  return (getDb().prepare("SELECT name FROM providers").all() as Row[]).some(
+    (r) => normName(r.name as string) === target,
+  );
+}
+
+/** Creates a professional (provider + login) and seeds their bookable slots. */
+export function createProfessional(args: {
+  name: string;
+  specialty: string;
+  roomLabel: string;
+  pinHash: string;
+  pinSalt: string;
+}): { provider: Provider; userId: string } {
+  const db = getDb();
+  const providerId = `prov_${randomUUID().slice(0, 8)}`;
+  const userId = `u_${randomUUID().slice(0, 8)}`;
+  const tx = db.transaction(() => {
+    db.prepare(
+      "INSERT INTO providers (id, name, specialty, room_label) VALUES (?, ?, ?, ?)",
+    ).run(providerId, args.name.trim(), args.specialty.trim(), args.roomLabel.trim());
+
+    const slot = db.prepare(
+      "INSERT INTO slots (id, provider_id, start, duration_minutes, taken) VALUES (?, ?, ?, 30, 0)",
+    );
+    for (const s of generateSlotRows(providerId)) slot.run(s.id, s.providerId, s.start);
+
+    db.prepare(
+      "INSERT INTO users (id, name, role, pin_hash, pin_salt, provider_id) VALUES (?, ?, 'medico', ?, ?, ?)",
+    ).run(userId, args.name.trim(), args.pinHash, args.pinSalt, providerId);
+  });
+  tx();
+  return { provider: getProvider(providerId)!, userId };
 }
 
 // ---------------------------------------------------------------------------

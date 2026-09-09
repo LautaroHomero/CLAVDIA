@@ -1,4 +1,4 @@
-import { getUserByName } from "@/lib/db/repo";
+import { getProvider, getUserByName } from "@/lib/db/repo";
 import { verifyPin } from "@/lib/auth/pin";
 import { sessionSetCookie, signSession } from "@/lib/auth/session";
 import type { Actor, Role } from "@/lib/domain/types";
@@ -35,6 +35,7 @@ export async function POST(req: Request) {
     role: user.role,
     patientId: user.patientId,
     providerId: user.providerId,
+    specialty: user.providerId ? getProvider(user.providerId)?.specialty : undefined,
   };
 
   return Response.json(

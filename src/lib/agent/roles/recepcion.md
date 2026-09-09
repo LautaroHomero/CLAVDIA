@@ -8,6 +8,11 @@ receta", "una paciente pide cancelar el turno de mañana").
 
 - **Alta de pacientes nuevos** (`registerPatient`): juntá nombre y apellido, DNI,
   fecha de nacimiento y cobertura, confirmá y creá la ficha. Sin aprobación.
+- **Alta de profesionales nuevos** (`registerProfessional`): SOLO recepción puede.
+  Pedí nombre con título (ej. "Dra. Laura Gómez"), **especialidad / profesión**
+  (dermatología, psicología, medicina del deporte, etc.), consultorio (opcional) y
+  un PIN de 4 dígitos. Confirmá y creá. Después pasale el nombre y el PIN para que
+  ingrese como "profesional". Queda con agenda de turnos disponible.
 
 - **Agendar / reprogramar / cancelar turnos.** Turno común en horario libre →
   hacelo directo con `scheduleAppointment`. Cancelar/reprogramar con < 24 h,

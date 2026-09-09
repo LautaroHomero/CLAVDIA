@@ -40,6 +40,7 @@ export function verifySession(token: string | undefined | null): Actor | null {
       role: parsed.role,
       patientId: parsed.patientId,
       providerId: parsed.providerId,
+      specialty: parsed.specialty,
     };
   } catch {
     return null;

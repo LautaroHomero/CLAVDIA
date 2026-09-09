@@ -25,7 +25,7 @@ Construido para el _Plaude Engineering Challenge_.
 
 | Rol | Entra como | Qué le pide al agente | Aprobaciones |
 | --- | --- | --- | --- |
-| **Médico/a** | Dra. Ruiz / Dr. Sosa | Su agenda, fichas de pacientes, su **bandeja de aprobaciones**, renovar recetas | Es la autoridad: actúa directo. No genera aprobaciones (solo `askHumanInput` ante ambigüedad real). |
+| **Profesional** | Médico/a de cualquier especialidad, psicólogo/a… (por nombre) | Su agenda, fichas de pacientes, su **bandeja de aprobaciones**, renovar recetas | Es la autoridad: actúa directo. No genera aprobaciones (solo `askHumanInput` ante ambigüedad real). |
 | **Recepción** | Sofía | Agendar / cancelar / reprogramar, tomar pedidos de receta, facturación — relatando lo que pide cada paciente | Dispara `requestHumanApproval` hacia el/la médico/a. |
 | **Paciente** | María Gómez / Jorge Fernández | Ver **su** ficha y turnos, sacar/cancelar turnos, pedir su receta | Todo lo sensible se escala. Solo ve su propio registro (forzado en el servidor). |
 
@@ -43,18 +43,27 @@ está arriba a la derecha del chat.
 
 Usuarios sembrados:
 
-| Nombre | Perfil | PIN |
+| Nombre | Perfil · profesión | PIN |
 | --- | --- | --- |
-| Dra. Elena Ruiz | profesional (médico/a) | `2468` |
-| Dr. Martín Sosa | profesional (médico/a) | `1357` |
-| Recepción (Sofía) | profesional (recepción) | `1234` |
+| Dra. Elena Ruiz | profesional · Clínica Médica | `2468` |
+| Dr. Martín Sosa | profesional · Cardiología | `1357` |
+| Dra. Sofía Paz | profesional · Dermatología | `3690` |
+| Lic. Paula Bianchi | profesional · Psicología | `1470` |
+| Dr. Nicolás Ferrari | profesional · Medicina del deporte | `2580` |
+| Recepción (Sofía) | profesional · recepción | `1234` |
 | María Gómez | paciente | `1111` |
 | Jorge Fernández | paciente | `2222` |
 
-**Paciente nuevo:** en la pantalla de paciente, _"¿Sos nuevo/a? Registrate"_ crea
-la ficha + un login (nombre, DNI, fecha de nacimiento, cobertura, PIN) y entra.
-Un profesional o un paciente ya logueado también puede dar de alta a otra persona
-pidiéndoselo al agente (`registerPatient`).
+Cada profesional tiene una **especialidad** y su propia agenda de turnos; el
+agente la conoce y "mi agenda / mis pacientes" se refieren a esa persona.
+
+**Alta de personas nuevas:**
+- **Paciente**: _"¿Sos nuevo/a? Registrate"_ en la pantalla de paciente crea la
+  ficha + un login y entra. Cualquier rol ya logueado también puede dar de alta
+  un paciente por chat (`registerPatient`).
+- **Profesional**: **solo recepción**, pidiéndoselo al agente
+  (`registerProfessional`): nombre con título, especialidad, consultorio y un PIN.
+  Queda con agenda disponible y puede entrar como "profesional".
 
 ---
 
@@ -101,6 +110,7 @@ Paciente/Recepción/Médico ─► /api/chat  ─► start(secretaryWorkflow, [m
 | --- | --- | --- |
 | Briefing del paciente | `getPatientBriefing` | El agente **siempre** arranca resumiendo (antecedentes, alergias, medicación, turnos, pendientes). |
 | Alta de paciente nuevo | `registerPatient` | Cualquier rol. El agente junta nombre, DNI, fecha de nacimiento y cobertura, confirma y crea la ficha. Sin aprobación; no duplica por DNI. |
+| Alta de profesional nuevo | `registerProfessional` | **Solo recepción.** Nombre con título, especialidad, consultorio y PIN → crea el profesional + su login + su agenda. |
 | Renovación de receta | `requestHumanApproval` → `createPrescriptionRenewal` | Recepción/paciente la escalan; el/la médico/a la hace directo. |
 | Reembolso ≥ $50.000 o motivo poco claro | `requestHumanApproval` → `refundInvoice` | |
 | Cancelar/reprogramar < 24 h o estudio caro | `requestHumanApproval` → `cancelAppointment` | |
