@@ -2,11 +2,13 @@ import { z } from "zod";
 import {
   bookSlot,
   cancelAppointmentById,
+  createPatient,
   createPrescriptionRequest,
   getAppointment,
   getInvoicesForPatient,
   getLabResultsForPatient,
   getPatient,
+  getPatientByDni,
   getProvider,
   getSlot,
   listAppointments,
@@ -53,6 +55,43 @@ async function clinicInfoStep() {
       resonancia: "Traer estudios previos. Avisar si tiene marcapasos o prótesis metálicas.",
       ecografiaAbdominal: "Ayuno de 6 horas.",
     },
+  };
+}
+
+async function registerPatientStep({
+  fullName,
+  dni,
+  dateOfBirth,
+  coverage,
+  phone,
+  email,
+  reason,
+}: {
+  fullName: string;
+  dni: string;
+  dateOfBirth: string;
+  coverage: string;
+  phone?: string;
+  email?: string;
+  reason?: string;
+}) {
+  "use step";
+  const existing = getPatientByDni(dni);
+  if (existing) {
+    return {
+      ok: false,
+      alreadyExists: true,
+      patientId: existing.id,
+      message: `Ya hay un paciente con DNI ${dni}: ${existing.fullName} (${existing.id}). No lo dupliques.`,
+    };
+  }
+  const patient = createPatient({ fullName, dni, dateOfBirth, coverage, phone, email, notes: reason });
+  return {
+    ok: true,
+    patientId: patient.id,
+    fullName: patient.fullName,
+    dni: patient.dni,
+    message: "Paciente dado de alta. Para acceso al portal, el paciente se registra desde la pantalla de login.",
   };
 }
 
@@ -283,6 +322,21 @@ export const secretaryTools = {
     execute: findPatientStep,
   },
 
+  registerPatient: {
+    description:
+      "Da de alta un paciente nuevo. Lo pueden hacer médico/a, recepción o el propio paciente (por ejemplo para un familiar). Antes de llamarlo, pedí: nombre y apellido, DNI, fecha de nacimiento (AAAA-MM-DD) y cobertura; teléfono y email son opcionales. Si ya existe alguien con ese DNI, no dupliques: informá el patientId que devuelve.",
+    inputSchema: z.object({
+      fullName: z.string(),
+      dni: z.string(),
+      dateOfBirth: z.string().describe("AAAA-MM-DD"),
+      coverage: z.string().describe("Obra social o prepaga"),
+      phone: z.string().optional(),
+      email: z.string().optional(),
+      reason: z.string().optional().describe("Motivo del alta / nota interna"),
+    }),
+    execute: registerPatientStep,
+  },
+
   getPatientBriefing: {
     description:
       "Compila el resumen previo del paciente (antecedentes, alergias, medicación, próximos turnos, pendientes). Llamalo SIEMPRE apenas identifiques al paciente, antes de cualquier otra acción.",
@@ -449,7 +503,14 @@ export const secretaryTools = {
 // Which tools each role may use
 // ---------------------------------------------------------------------------
 
-const COMMON = ["getClinicInfo", "getPatientBriefing", "listAvailableSlots", "requestHumanApproval", "askHumanInput"] as const;
+const COMMON = [
+  "getClinicInfo",
+  "getPatientBriefing",
+  "listAvailableSlots",
+  "registerPatient",
+  "requestHumanApproval",
+  "askHumanInput",
+] as const;
 
 export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
   medico: [

@@ -133,6 +133,50 @@ export function getUserWithPin(
   return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
 }
 
+/** Normalize a name for matching: trim, lowercase, strip accents. */
+function normName(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+/** Login by typed name (case- and accent-insensitive), optionally restricted to roles. */
+export function getUserByName(
+  name: string,
+  roles?: Role[],
+): (User & { pinHash: string; pinSalt: string }) | undefined {
+  const target = normName(name);
+  const rows = getDb().prepare("SELECT * FROM users").all() as Row[];
+  const r = rows.find((row) => normName(row.name as string) === target);
+  if (!r) return undefined;
+  if (roles && !roles.includes(r.role as Role)) return undefined;
+  return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
+}
+
+export function userNameTaken(name: string): boolean {
+  const target = normName(name);
+  const rows = getDb().prepare("SELECT name FROM users").all() as Row[];
+  return rows.some((row) => normName(row.name as string) === target);
+}
+
+/** Creates a login (used by patient self-signup and by the registerPatient tool). */
+export function createPatientUser(args: {
+  name: string;
+  pinHash: string;
+  pinSalt: string;
+  patientId: string;
+}): User {
+  const id = `u_${randomUUID().slice(0, 8)}`;
+  getDb()
+    .prepare(
+      "INSERT INTO users (id, name, role, pin_hash, pin_salt, patient_id) VALUES (?, ?, 'paciente', ?, ?, ?)",
+    )
+    .run(id, args.name.trim(), args.pinHash, args.pinSalt, args.patientId);
+  return { id, name: args.name.trim(), role: "paciente", patientId: args.patientId };
+}
+
 // ---------------------------------------------------------------------------
 // Providers
 // ---------------------------------------------------------------------------
@@ -159,6 +203,45 @@ function medsFor(patientId: string): Medication[] {
 export function getPatient(id: string): Patient | undefined {
   const r = getDb().prepare("SELECT * FROM patients WHERE id = ?").get(id) as Row | undefined;
   return r ? toPatient(r, medsFor(id)) : undefined;
+}
+
+export function getPatientByDni(dni: string): Patient | undefined {
+  const bare = dni.replace(/\D/g, "");
+  const r = getDb()
+    .prepare("SELECT * FROM patients WHERE replace(replace(dni,'.',''),' ','') = ?")
+    .get(bare) as Row | undefined;
+  return r ? toPatient(r, medsFor(r.id as string)) : undefined;
+}
+
+export interface NewPatientInput {
+  fullName: string;
+  dni: string;
+  dateOfBirth: string;
+  coverage: string;
+  phone?: string;
+  email?: string;
+  notes?: string;
+}
+
+/** Inserts a patient record. Returns the created patient. */
+export function createPatient(input: NewPatientInput): Patient {
+  const id = `pat_${randomUUID().slice(0, 8)}`;
+  getDb()
+    .prepare(
+      `INSERT INTO patients (id, full_name, dni, date_of_birth, phone, email, coverage, allergies, active_conditions, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', ?)`,
+    )
+    .run(
+      id,
+      input.fullName.trim(),
+      input.dni.trim(),
+      input.dateOfBirth.trim(),
+      input.phone?.trim() ?? "",
+      input.email?.trim() ?? "",
+      input.coverage.trim(),
+      input.notes?.trim() ?? null,
+    );
+  return getPatient(id)!;
 }
 
 export function searchPatients(query: string): Patient[] {

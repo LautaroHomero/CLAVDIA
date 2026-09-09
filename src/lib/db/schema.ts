@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS users (
   provider_id TEXT REFERENCES providers(id)
 );
 
+-- One login per name (case-insensitive) so typed-name login is unambiguous.
+CREATE UNIQUE INDEX IF NOT EXISTS users_name_unique ON users (lower(trim(name)));
+
 -- Human-in-the-loop requests the workflow is blocked on. Shared source of truth
 -- for the web UI panel and the Slack integration (fixes cross-process state).
 CREATE TABLE IF NOT EXISTS pending_requests (

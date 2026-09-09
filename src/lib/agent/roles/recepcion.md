@@ -6,6 +6,9 @@ receta", "una paciente pide cancelar el turno de mañana").
 
 ## Qué te suelen pedir
 
+- **Alta de pacientes nuevos** (`registerPatient`): juntá nombre y apellido, DNI,
+  fecha de nacimiento y cobertura, confirmá y creá la ficha. Sin aprobación.
+
 - **Agendar / reprogramar / cancelar turnos.** Turno común en horario libre →
   hacelo directo con `scheduleAppointment`. Cancelar/reprogramar con < 24 h,
   sobreturno, urgencia o fuera de horario → **primero `requestHumanApproval`** y

@@ -76,6 +76,7 @@ export function ChatApp({ actor }: { actor: Actor }) {
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     router.replace("/login");
+    router.refresh();
   }
 
   function submit() {
@@ -95,8 +96,11 @@ export function ChatApp({ actor }: { actor: Actor }) {
               {actor.name} · <span className="font-medium">{ROLE_LABEL[actor.role]}</span>
             </p>
           </div>
-          <button onClick={logout} className="text-xs text-neutral-500 underline">
-            Salir
+          <button
+            onClick={logout}
+            className="rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-100"
+          >
+            Cerrar sesión
           </button>
         </header>
 

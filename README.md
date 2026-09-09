@@ -6,7 +6,7 @@ cuando una acción es sensible (renovar una receta, reembolsar una factura alta,
 pedido ambiguo…), **pausa el workflow** y le pide a una persona que apruebe o
 aclare — por **Slack** o desde la propia UI — y recién entonces continúa.
 
-Cada persona entra con **usuario + PIN** y, según su rol (**médico/a**,
+Cada persona entra con **perfil (paciente/profesional) + nombre + PIN** y, según su rol (**médico/a**,
 **recepción** o **paciente**), el agente cambia sus instrucciones, las
 herramientas disponibles y a qué datos puede acceder.
 
@@ -35,22 +35,33 @@ servidor además limita el **set de herramientas** por rol
 ([`TOOLS_BY_ROLE`](src/workflows/secretary/tools.ts)) y pasa el `Actor` a cada
 tool para acotar los datos (un paciente nunca ve otra ficha).
 
-### Usuarios de demo (PIN)
+### Login
 
-| Usuario | Rol | PIN |
+En `/login` elegís **Soy paciente** o **Soy profesional**, escribís tu **nombre**
+(sin importar mayúsculas ni acentos) y tu **PIN** de 4 dígitos. "Cerrar sesión"
+está arriba a la derecha del chat.
+
+Usuarios sembrados:
+
+| Nombre | Perfil | PIN |
 | --- | --- | --- |
-| Dra. Elena Ruiz | médico/a | `2468` |
-| Dr. Martín Sosa | médico/a | `1357` |
-| Recepción (Sofía) | recepción | `1234` |
+| Dra. Elena Ruiz | profesional (médico/a) | `2468` |
+| Dr. Martín Sosa | profesional (médico/a) | `1357` |
+| Recepción (Sofía) | profesional (recepción) | `1234` |
 | María Gómez | paciente | `1111` |
 | Jorge Fernández | paciente | `2222` |
+
+**Paciente nuevo:** en la pantalla de paciente, _"¿Sos nuevo/a? Registrate"_ crea
+la ficha + un login (nombre, DNI, fecha de nacimiento, cobertura, PIN) y entra.
+Un profesional o un paciente ya logueado también puede dar de alta a otra persona
+pidiéndoselo al agente (`registerPatient`).
 
 ---
 
 ## Cómo funciona
 
 ```
-Login (usuario + PIN) ─► cookie de sesión firmada (Actor: userId, role, patientId?/providerId?)
+Login (perfil + nombre + PIN) ─► cookie de sesión firmada (Actor: userId, role, patientId?/providerId?)
         │
 Paciente/Recepción/Médico ─► /api/chat  ─► start(secretaryWorkflow, [messages, actor])
                                               │
@@ -89,6 +100,7 @@ Paciente/Recepción/Médico ─► /api/chat  ─► start(secretaryWorkflow, [m
 | Situación | Herramienta | Nota |
 | --- | --- | --- |
 | Briefing del paciente | `getPatientBriefing` | El agente **siempre** arranca resumiendo (antecedentes, alergias, medicación, turnos, pendientes). |
+| Alta de paciente nuevo | `registerPatient` | Cualquier rol. El agente junta nombre, DNI, fecha de nacimiento y cobertura, confirma y crea la ficha. Sin aprobación; no duplica por DNI. |
 | Renovación de receta | `requestHumanApproval` → `createPrescriptionRenewal` | Recepción/paciente la escalan; el/la médico/a la hace directo. |
 | Reembolso ≥ $50.000 o motivo poco claro | `requestHumanApproval` → `refundInvoice` | |
 | Cancelar/reprogramar < 24 h o estudio caro | `requestHumanApproval` → `cancelAppointment` | |
@@ -176,7 +188,8 @@ src/
 │   ├── chat-app.tsx              cliente: chat + panel de aprobaciones (por rol)
 │   ├── login/page.tsx            selector de usuario + PIN
 │   └── api/
-│       ├── auth/{login,logout,me,users}   sesión (cookie firmada, PIN con scrypt)
+│       ├── auth/{login,logout,me,users}   sesión (kind + nombre + PIN scrypt, cookie firmada)
+│       ├── patients/route.ts     alta de paciente por autogestión (crea ficha + login)
 │       ├── chat/route.ts         start(secretaryWorkflow, [messages, actor]) + stream SSE
 │       ├── approvals/route.ts    GET pendientes (scope por rol) · POST decisión → resumeHook
 │       └── slack/actions/route.ts  webhook de interactividad de Slack → resumeHook

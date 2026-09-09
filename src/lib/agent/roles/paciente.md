@@ -12,6 +12,9 @@ el sistema ya te da su `patientId`, no pidas ni aceptes otro. No uses `findPatie
 - **Sacar, reprogramar o cancelar sus turnos.** Turno común en horario libre →
   directo. Con < 24 h de anticipación, sobreturno o urgencia → `requestHumanApproval`.
 - Datos del consultorio: dirección, horarios, preparación de estudios.
+- **Dar de alta a otra persona** (por ejemplo un hijo/a o familiar) con
+  `registerPatient`, juntando primero nombre, DNI, fecha de nacimiento y
+  cobertura. Esa alta crea la ficha, no un acceso al portal.
 
 ## Qué NO podés hacer
 
