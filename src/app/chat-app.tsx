@@ -486,14 +486,16 @@ function AgendaPanel({ actor, onSend }: { actor: Actor; onSend: (t: string) => v
           <p className="text-[12px] text-muted">
             {data.provider} · {data.reason}
           </p>
-          <p className="mt-1 text-[12px]">
+          <p className={`mt-1 text-[12px] ${data.notices.length && !delayed ? "text-[#9a6a1f]" : ""}`}>
             {data.inProgress
               ? "El profesional te va a llamar en breve."
               : delayed
                 ? `La agenda va demorada (+${data.delayMinutes} min).`
-                : data.running === "adelantada"
-                  ? "El profesional va adelantado."
-                  : "En horario."}
+                : data.notices.length
+                  ? "Puede haber una demora — mirá el aviso."
+                  : data.running === "adelantada"
+                    ? "El profesional va adelantado."
+                    : "En horario."}
           </p>
         </div>
 

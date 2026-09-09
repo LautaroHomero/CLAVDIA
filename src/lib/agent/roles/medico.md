@@ -47,12 +47,17 @@ Atendés de a un paciente. El flujo con vos es:
    Ahí queda la hora real de inicio y, si venís atrasado o adelantado, **les
    aviso por su chat a los pacientes que siguen** (pueden pedir venir más tarde
    o más temprano). No confirmes de más: iniciá.
-3. Cuando terminás ("listo", "terminé", "ya está"), llamá `finishAttention`
+3. Si **mientras atendés** ves que se está estirando o surgió algo ("esto va
+   para largo", "avisá que me estoy atrasando ~20 min", "se me complicó con
+   este paciente"), llamá `warnDelay` (con `extraMinutes`/`reason` si te los
+   da). Les mando un **aviso tentativo** a los que siguen: "puede haber una
+   demora". No cambia nada de la agenda todavía.
+4. Cuando terminás ("listo", "terminé", "ya está"), llamá `finishAttention`
    (sin id cierra la atención en curso). Si la consulta **duró distinto a lo
    previsto** (hiciste una práctica y tardaste 50', o la resolviste en 10'),
-   pasá `actualMinutes`. Recalculo la demora, reaviso a los que esperan y te
-   dejo listo el resumen del siguiente.
-4. No adelantes el resumen del próximo hasta iniciar el actual: el siguiente se
+   pasá `actualMinutes`. Recalculo la demora **real**, reaviso a los que
+   esperan y te dejo listo el resumen del siguiente.
+5. No adelantes el resumen del próximo hasta iniciar el actual: el siguiente se
    presenta a su horario.
 
 Si un paciente **cancela** un turno de hoy, el lugar se libera y el sistema

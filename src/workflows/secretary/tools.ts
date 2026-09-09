@@ -541,6 +541,8 @@ async function closeDayStep({ date }: { date?: string }, ctx: ToolCtx) {
 // ---------------------------------------------------------------------------
 
 const toMin = (hm: string) => Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3, 5));
+const fromMin = (m: number) =>
+  `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 
 /**
  * Refresh the notice for every waiting patient after the agenda changes
@@ -572,6 +574,41 @@ function refreshWaitingNotices(providerId: string): { patient: string; message: 
     }
   }
   return out;
+}
+
+/**
+ * Tentative heads-up while still attending: tells the patients that follow that
+ * a delay is likely (unlike refreshWaitingNotices, which reacts to a confirmed
+ * offset after a visit starts/ends).
+ */
+async function warnDelayStep(
+  { extraMinutes, reason }: { extraMinutes?: number; reason?: string },
+  ctx: ToolCtx,
+) {
+  "use step";
+  const actor = actorOf(ctx);
+  const providerId = actor?.role === "medico" ? actor.providerId : undefined;
+  if (!providerId) {
+    return { ok: false, error: "Esta herramienta es para el profesional (se demora en su consulta)." };
+  }
+  const extra = Math.max(5, Math.round(extraMinutes ?? 15));
+  const agenda = providerAgenda(providerId, DEMO_TODAY);
+  const waiting = [...(agenda.next ? [agenda.next] : []), ...agenda.upcoming];
+  if (waiting.length === 0) {
+    return { ok: true, message: "No hay pacientes esperando a los que avisar.", avisosEnviados: [] };
+  }
+  const because = reason?.trim() ? ` (${reason.trim()})` : "";
+  const out: { patient: string; message: string }[] = [];
+  for (const e of waiting) {
+    const est = fromMin(toMin(e.estimated) + extra);
+    const msg =
+      `El/la profesional se está demorando${because}. Tu turno de las ${e.scheduled} ` +
+      `podría correrse ~${extra} min (estimado ~${est}). Te confirmamos apenas se libere; ` +
+      `si preferís, podés venir más tarde.`;
+    replacePatientNotice(e.appointmentId, e.patientId, DEMO_TODAY, msg);
+    out.push({ patient: e.patientName, message: msg });
+  }
+  return { ok: true, extraMinutes: extra, avisosEnviados: out };
 }
 
 async function nextPatientStep(_input: unknown, ctx: ToolCtx) {
@@ -963,6 +1000,16 @@ export const secretaryTools = {
     execute: finishAttentionStep,
   },
 
+  warnDelay: {
+    description:
+      "Para el PROFESIONAL: mientras todavía está atendiendo, avisa a los pacientes que siguen que PUEDE haber una demora (aviso tentativo). Usalo si la consulta se está estirando o surgió algo. `extraMinutes` opcional (default 15), `reason` opcional.",
+    inputSchema: z.object({
+      extraMinutes: z.number().optional().describe("Cuántos minutos estimás de más"),
+      reason: z.string().optional(),
+    }),
+    execute: warnDelayStep,
+  },
+
   getMyVisitStatus: {
     description:
       "Para el PACIENTE: estado de su turno de hoy — horario programado, estimado ahora, demora, cómo viene la agenda, si hay lugar para ir antes, y los avisos que le mandó el consultorio.",
@@ -1072,6 +1119,7 @@ export const TOOLS_BY_ROLE: Record<Role, (keyof typeof secretaryTools)[]> = {
     "getNextPatient",
     "startAttention",
     "finishAttention",
+    "warnDelay",
     "scheduleAppointment",
     "cancelAppointment",
     "rescheduleAppointment",
