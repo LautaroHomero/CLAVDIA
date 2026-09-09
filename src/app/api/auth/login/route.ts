@@ -49,7 +49,10 @@ export async function POST(req: Request) {
       ? mems.find((m) => m.organizationId === organizationId)
       : mems[0];
     if (!chosen) {
-      return Response.json({ ok: false, error: "Organización inválida." }, { status: 400 });
+      return Response.json(
+        { ok: false, error: "Ese usuario no trabaja en el consultorio elegido." },
+        { status: 403 },
+      );
     }
     claims.activeOrgId = chosen.organizationId;
     claims.role = chosen.role;

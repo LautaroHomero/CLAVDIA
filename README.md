@@ -168,17 +168,22 @@ Cambiar el comportamiento del agente = editar estos `.md`. No hay recompilar.
 
 ### 4.1 Login
 
-`/login` → elegís **Soy paciente** o **Soy profesional** → escribís **nombre**
-(sin distinguir mayúsculas ni acentos: `maria gomez` = `María Gómez`) → **PIN** de
-4 dígitos. El perfil filtra qué roles acepta ese login (un paciente no entra por
-"profesional"). El PIN se guarda con `scrypt` + salt; la sesión es una cookie
-`HttpOnly` firmada con HMAC (`AUTH_SECRET`).
+`/login` → elegís **Soy paciente** o **Soy profesional**. El nombre no distingue
+mayúsculas ni acentos (`maria gomez` = `María Gómez`); el PIN es de 4 dígitos, se
+guarda con `scrypt` + salt, y la sesión es una cookie `HttpOnly` firmada con HMAC
+(`AUTH_SECRET`). El perfil filtra qué roles acepta ese login (un paciente no
+entra por "profesional").
 
-- **Profesional en varios consultorios:** si el nombre + PIN pertenece a más de
-  una organización, el login responde `{ needsOrg: true, organizations: [...] }` y
-  la UI pide **elegir con cuál entrar**. La cookie guarda ese `activeOrgId`; se
-  cambia cerrando sesión o con el selector del encabezado (`POST
-  /api/auth/switch-org`).
+- **Paciente:** nombre + PIN.
+- **Profesional:** primero **buscás tu lugar de trabajo** por nombre o dirección
+  (`GET /api/organizations`, filtrado en el cliente) y lo elegís; recién ahí
+  cargás **tu nombre + PIN**. El login va con ese `organizationId`, así que no se
+  exponen nombres de staff y no hace falta un segundo paso de "elegí consultorio".
+  Si el usuario no trabaja en el consultorio elegido → `403`. La cookie guarda
+  ese `activeOrgId`; se cambia cerrando sesión o con el selector del encabezado
+  (`POST /api/auth/switch-org`). _(Si un cliente de API no manda `organizationId`
+  y el usuario tiene varias membresías, el endpoint responde `{ needsOrg: true,
+  organizations: [...] }` como fallback.)_
 - **Paciente nuevo:** _"¿Sos nuevo/a? Registrate"_ → formulario (nombre, DNI,
   fecha de nacimiento, cobertura, **consultorio**, PIN) → crea la ficha **y** el
   login, lo asocia a ese consultorio y entra. Si el DNI ya tenía ficha, la
@@ -482,11 +487,12 @@ primer arranque; para empezar de cero: `rm -rf data && npm run dev`.
 
 **Gratis, sin gastar tokens** (login y paneles):
 
-- Login profesional (`Dra. Elena Ruiz` / `2468`) → **pide elegir consultorio**
-  (Belgrano / Palermo). PIN incorrecto (error), perfil cruzado (`María Gómez` por
-  "profesional" → rechaza).
-- Con Dra. Ruiz adentro, usá el **selector de consultorio del encabezado**: la
-  agenda y el panel cambian de Belgrano a Palermo.
+- Login profesional: **buscá el consultorio** ("Belgrano" o "Cabildo") → elegilo
+  → `Dra. Elena Ruiz` / `2468`. PIN incorrecto (error); consultorio equivocado
+  (elegí Clínica del Deporte con la Dra. Ruiz → `403`); perfil cruzado
+  (`María Gómez` por "profesional" → rechaza).
+- Con Dra. Ruiz adentro (entró por Belgrano), usá el **selector de consultorio
+  del encabezado**: la agenda y el panel cambian a Palermo.
 - "¿Sos nuevo/a? Registrate" → alta de paciente por autogestión (elegí
   consultorio). "Registrar un consultorio nuevo" → crea org + recepción y entra.
 - Login `María Gómez` / `1111` → *Mis turnos* muestra turnos de **Belgrano y
@@ -539,7 +545,7 @@ src/
 │       ├── calendar/route.ts        mini-calendario (role-aware)
 │       ├── patients/route.ts        alta de paciente por autogestión (ficha + login + join a un consultorio)
 │       ├── organizations/route.ts   GET lista pública · POST alta self-serve de consultorio + recepción
-│       └── auth/{login,logout,me,users,switch-org}/route.ts
+│       └── auth/{login,logout,me,switch-org}/route.ts
 ├── workflows/secretary/
 │   ├── workflow.ts                  "use workflow": DurableAgent, instrucciones + activeTools + Actor por rol
 │   ├── tools.ts                     todas las tools ("use step") + TOOLS_BY_ROLE

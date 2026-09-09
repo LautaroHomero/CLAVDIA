@@ -4,7 +4,10 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type Screen = "pick" | "login-profesional" | "login-paciente" | "signup" | "new-org";
-type OrgOpt = { id: string; name: string; role?: string };
+type OrgOpt = { id: string; name: string; address?: string; role?: string };
+
+const norm = (s: string) =>
+  s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 
 const FIELD =
   "w-full rounded-md border border-hairline bg-surface px-3.5 py-2.5 text-[16px] text-ink placeholder:text-muted/70 transition-colors focus:border-ink focus:outline-none";
@@ -15,11 +18,9 @@ const CARD = "rounded-xl border border-hairline bg-surface p-5 shadow-card";
 export default function LoginPage() {
   const router = useRouter();
   const [screen, setScreen] = useState<Screen>("pick");
-  const [staff, setStaff] = useState<{ name: string; orgs: string[] }[]>([]);
   const [orgs, setOrgs] = useState<OrgOpt[]>([]);
 
   useEffect(() => {
-    fetch("/api/auth/users").then((r) => r.json()).then((d) => setStaff(d.staff ?? [])).catch(() => {});
     fetch("/api/organizations").then((r) => r.json()).then((d) => setOrgs(d.organizations ?? [])).catch(() => {});
   }, []);
 
@@ -52,7 +53,7 @@ export default function LoginPage() {
 
       {screen === "login-profesional" && (
         <Framed onBack={() => setScreen("pick")}>
-          <ProfesionalLogin hints={staff.filter((s) => s.orgs.length).map((s) => s.name)} onDone={go} />
+          <ProfesionalLogin orgs={orgs} onDone={go} />
         </Framed>
       )}
 
@@ -101,30 +102,33 @@ function Err({ msg }: { msg: string }) {
   return msg ? <p className="text-[13px] text-[#c0392b]">{msg}</p> : null;
 }
 
-function ProfesionalLogin({ hints, onDone }: { hints: string[]; onDone: () => void }) {
+function ProfesionalLogin({ orgs, onDone }: { orgs: OrgOpt[]; onDone: () => void }) {
+  const [query, setQuery] = useState("");
+  const [org, setOrg] = useState<OrgOpt | null>(null);
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
-  const [pending, setPending] = useState<OrgOpt[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function submit(organizationId?: string) {
+  const q = norm(query.trim());
+  const matches = q
+    ? orgs.filter((o) => norm(`${o.name} ${o.address ?? ""}`).includes(q))
+    : orgs;
+
+  async function submit() {
+    if (!org) return;
     setBusy(true);
     setError("");
     try {
       const r = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: "profesional", name, pin, organizationId }),
+        body: JSON.stringify({ kind: "profesional", name, pin, organizationId: org.id }),
       });
       const d = await r.json();
       if (!r.ok || !d.ok) {
         setError(d.error ?? "No se pudo iniciar sesión.");
         setPin("");
-        return;
-      }
-      if (d.needsOrg) {
-        setPending(d.organizations);
         return;
       }
       onDone();
@@ -133,40 +137,49 @@ function ProfesionalLogin({ hints, onDone }: { hints: string[]; onDone: () => vo
     }
   }
 
-  if (pending) {
+  // Step 1 — find your workplace
+  if (!org) {
     return (
       <div className="space-y-3">
-        <p className="text-[14px] font-semibold text-ink">¿En qué consultorio entrás?</p>
-        {pending.map((o) => (
-          <button key={o.id} onClick={() => submit(o.id)} disabled={busy}
-            className="w-full rounded-md border border-hairline px-3.5 py-2.5 text-left text-[15px] hover:border-ink">
-            {o.name} <span className="text-[12px] text-muted">· {o.role}</span>
-          </button>
-        ))}
-        <Err msg={error} />
+        <label className="block text-[13px] font-semibold text-ink">¿Dónde trabajás?</label>
+        <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)}
+          placeholder="Buscá tu consultorio por nombre o dirección" className={FIELD} />
+        <div className="space-y-1.5">
+          {matches.map((o) => (
+            <button key={o.id} onClick={() => { setOrg(o); setError(""); }}
+              className="w-full rounded-md border border-hairline px-3.5 py-2.5 text-left transition-colors hover:border-ink">
+              <span className="block text-[15px] text-ink">{o.name}</span>
+              {o.address && <span className="mt-0.5 block text-[12px] text-muted">{o.address}</span>}
+            </button>
+          ))}
+          {matches.length === 0 && (
+            <p className="text-[13px] text-muted">
+              No encontramos consultorios con “{query.trim()}”.
+            </p>
+          )}
+        </div>
       </div>
     );
   }
 
+  // Step 2 — credentials for the chosen workplace
   return (
     <div className="space-y-3">
+      <div className="rounded-md border border-hairline bg-canvas px-3.5 py-2.5">
+        <span className="block text-[15px] text-ink">{org.name}</span>
+        {org.address && <span className="mt-0.5 block text-[12px] text-muted">{org.address}</span>}
+        <button onClick={() => { setOrg(null); setName(""); setPin(""); setError(""); }}
+          className="mt-1.5 text-[12px] font-medium text-muted underline decoration-hairline-strong underline-offset-4 hover:text-ink">
+          cambiar de consultorio
+        </button>
+      </div>
       <label className="block text-[13px] font-semibold text-ink">Nombre</label>
       <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Tu nombre" className={FIELD} />
-      {hints.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {hints.map((h) => (
-            <button key={h} onClick={() => setName(h)}
-              className="rounded-full border border-hairline px-2.5 py-1 text-[12px] text-muted hover:border-ink hover:text-ink">
-              {h}
-            </button>
-          ))}
-        </div>
-      )}
       <label className="block text-[13px] font-semibold text-ink">PIN</label>
       <input value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
         onKeyDown={(e) => e.key === "Enter" && submit()} inputMode="numeric" placeholder="4 dígitos"
         className={`${FIELD} text-center text-[20px] tracking-[0.4em]`} />
-      <button onClick={() => submit()} disabled={busy || !name.trim() || pin.length < 4} className={PRIMARY}>
+      <button onClick={submit} disabled={busy || !name.trim() || pin.length < 4} className={PRIMARY}>
         Entrar
       </button>
       <Err msg={error} />

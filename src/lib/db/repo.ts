@@ -235,21 +235,6 @@ export function getUser(id: string): User | undefined {
   return r ? toUser(r) : undefined;
 }
 
-/** Staff names, for login hints (no secrets). */
-export function listStaffNames(): { name: string; orgs: string[] }[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT u.id, u.name, group_concat(o.name, ' · ') AS orgs
-       FROM users u
-       JOIN memberships m ON m.user_id = u.id
-       JOIN organizations o ON o.id = m.organization_id
-       WHERE u.role != 'paciente'
-       GROUP BY u.id ORDER BY u.name`,
-    )
-    .all() as Row[];
-  return rows.map((r) => ({ name: r.name as string, orgs: ((r.orgs as string) ?? "").split(" · ") }));
-}
-
 export function userNameTaken(name: string): boolean {
   const t = normName(name);
   return (getDb().prepare("SELECT name FROM users").all() as Row[]).some(
