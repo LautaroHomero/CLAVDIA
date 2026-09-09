@@ -19,7 +19,7 @@ Construido para el _Plaude Engineering Challenge_.
 
 | Paso | Pedido | Dónde está |
 | --- | --- | --- |
-| **1** | UI simple en Next.js para interactuar con el agente | App Router + `useChat` (streaming SSE). [`src/app/chat-app.tsx`](src/app/chat-app.tsx), login en [`src/app/login/page.tsx`](src/app/login/page.tsx). |
+| **1** | UI simple en Next.js para interactuar con el agente | App Router + `useChat` (streaming SSE). [`src/app/chat-app.tsx`](src/app/chat-app.tsx) (vista Asistente) y [`src/app/system-view.tsx`](src/app/system-view.tsx) (vista Sistema, sin IA), login en [`src/app/login/page.tsx`](src/app/login/page.tsx). |
 | **2** | Agente con `DurableAgent` de Workflow DevKit + paso human-in-the-loop por Slack | [`src/workflows/secretary/workflow.ts`](src/workflows/secretary/workflow.ts) (el `DurableAgent`), [`hooks.ts`](src/workflows/secretary/hooks.ts) + [`request-human.ts`](src/workflows/secretary/request-human.ts) (la suspensión y el reanudado), [`src/app/api/slack/actions/route.ts`](src/app/api/slack/actions/route.ts) (webhook de Slack). |
 | **3** | Instrucciones base en texto plano con escenarios que requieren aprobación | [`src/lib/agent/instructions.md`](src/lib/agent/instructions.md) (base) + [`src/lib/agent/roles/*.md`](src/lib/agent/roles) (por rol). |
 | **4** | Email a opentowork@plaude.com con el link del repo | Enviado por separado. |
@@ -347,15 +347,20 @@ turno y avanza a medida que se atiende. Cada turno guarda `actual_start` /
 
 ## 6. La UI
 
-Chat con streaming (`useChat` + SSE) y, a la derecha, un **panel lateral distinto
-por rol** (Tailwind v4, tokens de diseño extraídos de una referencia real:
-tinta carbón `#222832` sobre lienzo `#f0f3f5`, tarjetas blancas, tipografía
-Pretendard).
+Tailwind v4, tokens de diseño extraídos de una referencia real (tinta carbón
+`#222832` sobre lienzo `#f0f3f5`, tarjetas blancas, tipografía Pretendard).
 
-El **encabezado** muestra el consultorio activo. Si el/la profesional pertenece a
-más de uno, ahí hay un **selector** que cambia de consultorio en caliente
-(`POST /api/auth/switch-org` + `router.refresh()`). Para el paciente lista los
-consultorios donde está asociado.
+Un **encabezado** común, siempre visible, con: quién sos + consultorio activo, un
+**conmutador de vista** (`Asistente` / `Sistema`, se recuerda en `localStorage`),
+el **selector de consultorio** (si el/la profesional pertenece a más de uno —
+`POST /api/auth/switch-org` + `router.refresh()`) y **Salir**. El estado del chat
+(`useChat`) vive en el contenedor, así que cambiar de vista **no pierde la
+conversación**.
+
+### 6.1 Vista **Asistente** (IA)
+
+El chat con streaming (`useChat` + SSE) y, a la derecha, un **panel lateral
+distinto por rol**.
 
 **Profesional** — layout más ancho:
 
@@ -380,6 +385,21 @@ consultorios donde está asociado.
 
 Endpoints que alimentan los paneles (polling): `GET /api/agenda` (estado vivo,
 role-aware) y `GET /api/calendar` (el mini-calendario, role-aware).
+
+### 6.2 Vista **Sistema** (sin IA)
+
+El mismo dato, sin agente: un **calendario** grande a la izquierda y un panel de
+fichas a la derecha. Todo de solo lectura — las altas y los cambios siguen
+haciéndose desde el chat. Una sola llamada: `GET /api/system` (polling 5 s).
+
+- **Staff** (médico/a y **recepción** — recepción no tenía calendario hasta acá):
+  agenda **de todo el consultorio activo** agrupada por día (hora · paciente ·
+  profesional · motivo · estado, con 🎂), y a la derecha _Mi perfil_, _Consultorio_
+  (dirección, horarios, teléfono) y _Profesionales_ (todos los del consultorio,
+  con especialidad y consultorio).
+- **Paciente**: su calendario (turnos de **todos** sus consultorios) y _Mi ficha_
+  — datos personales, cobertura, alergias, condiciones activas, medicación
+  (marca las crónicas) y en qué consultorios está.
 
 ---
 
@@ -499,6 +519,9 @@ primer arranque; para empezar de cero: `rm -rf data && npm run dev`.
   Palermo** juntos.
 - Mirá los paneles: profesional ve *Consultorio · ahora* + *Mi agenda*; paciente
   ve *Tu turno de hoy* + *Mis turnos* (solo los suyos).
+- Conmutá **Asistente / Sistema** en el encabezado: la vista Sistema muestra el
+  calendario del consultorio + _Consultorio_ + _Profesionales_ (staff), o el
+  calendario + _Mi ficha_ (paciente). La conversación no se pierde al volver.
 - Aprobar/rechazar en el panel **no** gasta (va directo a la API).
 
 **Con el agente** (recargá la página al cambiar de usuario; resetea el historial):
@@ -534,7 +557,8 @@ se siembra al *próximo* horario, +30 y +60 min). Para reiniciarla:
 src/
 ├── app/
 │   ├── page.tsx                     server: valida la sesión → /login o <ChatApp>
-│   ├── chat-app.tsx                 cliente: chat + paneles por rol
+│   ├── chat-app.tsx                 cliente: encabezado + conmutador de vista; vista Asistente (chat + paneles)
+│   ├── system-view.tsx              cliente: vista Sistema (calendario + fichas, sin IA)
 │   ├── login/page.tsx               perfil + PIN, picker de consultorio, alta de paciente, alta de consultorio
 │   ├── globals.css                  tokens de diseño (Tailwind v4 @theme)
 │   └── api/
@@ -542,7 +566,8 @@ src/
 │       ├── approvals/route.ts       GET pendientes (scope por rol) · POST decisión → resumeHook
 │       ├── slack/actions/route.ts   webhook de Slack (firma verificada) → resumeHook
 │       ├── agenda/route.ts          estado vivo de la agenda (role-aware)
-│       ├── calendar/route.ts        mini-calendario (role-aware)
+│       ├── calendar/route.ts        mini-calendario de la vista Asistente (role-aware)
+│       ├── system/route.ts          datos de la vista Sistema (calendario org-wide + fichas)
 │       ├── patients/route.ts        alta de paciente por autogestión (ficha + login + join a un consultorio)
 │       ├── organizations/route.ts   GET lista pública · POST alta self-serve de consultorio + recepción
 │       └── auth/{login,logout,me,switch-org}/route.ts

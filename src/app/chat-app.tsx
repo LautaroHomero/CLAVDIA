@@ -6,6 +6,10 @@ import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import type { Actor, Role } from "@/lib/domain/types";
 import type { PendingHumanRequest } from "@/lib/approvals/types";
+import { SystemView } from "./system-view";
+
+type View = "ia" | "sistema";
+const VIEW_KEY = "clavdia_view";
 
 const ROLE_LABEL: Record<Role, string> = {
   medico: "Médico/a",
@@ -58,8 +62,157 @@ const PANEL_TITLE: Record<Role, string> = {
 export function ChatApp({ actor }: { actor: Actor }) {
   const router = useRouter();
   const transport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
-  const { messages, sendMessage, status, error } = useChat({ transport });
+  const chat = useChat({ transport });
   const [input, setInput] = useState("");
+  const [view, setView] = useState<View>("ia");
+
+  // Restore the last-used view (survives the refresh() an org switch triggers too).
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(VIEW_KEY);
+      if (v === "ia" || v === "sistema") setView(v);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  function changeView(v: View) {
+    setView(v);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.replace("/login");
+    router.refresh();
+  }
+
+  const wide = actor.role !== "paciente";
+  return (
+    <main
+      className={`mx-auto flex w-full flex-col gap-4 p-4 md:h-[100dvh] md:overflow-hidden md:p-6 ${
+        wide ? "max-w-6xl" : "max-w-4xl"
+      }`}
+    >
+      <TopBar actor={actor} view={view} onView={changeView} onLogout={logout} />
+      {view === "ia" ? (
+        <ChatView
+          actor={actor}
+          messages={chat.messages}
+          sendMessage={(text) => chat.sendMessage({ text })}
+          status={chat.status}
+          error={chat.error}
+          input={input}
+          setInput={setInput}
+        />
+      ) : (
+        <SystemView actor={actor} />
+      )}
+    </main>
+  );
+}
+
+function TopBar({
+  actor,
+  view,
+  onView,
+  onLogout,
+}: {
+  actor: Actor;
+  view: View;
+  onView: (v: View) => void;
+  onLogout: () => void;
+}) {
+  const router = useRouter();
+  return (
+    <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-xl border border-hairline bg-surface px-5 py-3 shadow-card">
+      <div className="min-w-0 space-y-0.5">
+        <h1 className="text-[15px] font-semibold tracking-tight text-ink">CLAVDIA Secretario médico</h1>
+        <p className="truncate text-[12px] text-muted">
+          {actor.name} ·{" "}
+          {actor.role === "paciente"
+            ? "Paciente"
+            : actor.activeOrg?.specialty ?? ROLE_LABEL[actor.role]}
+          {actor.activeOrg ? ` · ${actor.activeOrg.name}` : ""}
+          {actor.role === "paciente" && actor.orgs.length
+            ? ` · ${actor.orgs.map((o) => o.name).join(", ")}`
+            : ""}
+        </p>
+      </div>
+
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div className="flex rounded-pill border border-hairline p-0.5 text-[12px] font-semibold">
+          <button
+            onClick={() => onView("ia")}
+            className={`rounded-pill px-3 py-1 transition-colors ${
+              view === "ia" ? "bg-ink text-white" : "text-muted hover:text-ink"
+            }`}
+          >
+            Asistente
+          </button>
+          <button
+            onClick={() => onView("sistema")}
+            className={`rounded-pill px-3 py-1 transition-colors ${
+              view === "sistema" ? "bg-ink text-white" : "text-muted hover:text-ink"
+            }`}
+          >
+            Sistema
+          </button>
+        </div>
+
+        {actor.role !== "paciente" && actor.orgs.length > 1 && (
+          <select
+            value={actor.activeOrg?.id ?? ""}
+            onChange={async (e) => {
+              await fetch("/api/auth/switch-org", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ organizationId: e.target.value }),
+              });
+              router.refresh();
+            }}
+            className="rounded-pill border border-hairline bg-surface px-2.5 py-1.5 text-[12px] font-medium text-ink"
+          >
+            {actor.orgs.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.name}
+              </option>
+            ))}
+          </select>
+        )}
+
+        <button
+          onClick={onLogout}
+          className="rounded-pill border border-hairline px-3.5 py-1.5 text-[12px] font-semibold text-muted transition-colors hover:border-ink hover:text-ink"
+        >
+          Salir
+        </button>
+      </div>
+    </header>
+  );
+}
+
+function ChatView({
+  actor,
+  messages,
+  sendMessage,
+  status,
+  error,
+  input,
+  setInput,
+}: {
+  actor: Actor;
+  messages: { id: string; role: string; parts: unknown[] }[];
+  sendMessage: (text: string) => void;
+  status: string;
+  error: Error | undefined;
+  input: string;
+  setInput: (s: string) => void;
+}) {
   const busy = status === "submitted" || status === "streaming";
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -69,71 +222,16 @@ export function ChatApp({ actor }: { actor: Actor }) {
     el.scrollTop = el.scrollHeight;
   }, [messages, status]);
 
-  async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.replace("/login");
-    router.refresh();
-  }
-
   function submit() {
     const text = input.trim();
     if (!text) return;
-    sendMessage({ text });
+    sendMessage(text);
     setInput("");
   }
 
-  const wide = actor.role !== "paciente";
   return (
-    <main
-      className={`mx-auto flex w-full flex-col gap-4 p-4 md:h-[100dvh] md:flex-row md:overflow-hidden md:p-6 ${
-        wide ? "max-w-6xl" : "max-w-4xl"
-      }`}
-    >
+    <div className="flex flex-1 flex-col gap-4 md:min-h-0 md:flex-row">
       <section className="flex min-h-[65vh] flex-1 flex-col overflow-hidden rounded-xl border border-hairline bg-surface shadow-card md:min-h-0">
-        <header className="flex items-center justify-between gap-3 border-b border-hairline px-5 py-3.5">
-          <div className="min-w-0 space-y-0.5">
-            <h1 className="text-[15px] font-semibold tracking-tight text-ink">CLAVDIA Secretario médico</h1>
-            <p className="truncate text-[12px] text-muted">
-              {actor.name} ·{" "}
-              {actor.role === "paciente"
-                ? "Paciente"
-                : actor.activeOrg?.specialty ?? ROLE_LABEL[actor.role]}
-              {actor.activeOrg ? ` · ${actor.activeOrg.name}` : ""}
-              {actor.role === "paciente" && actor.orgs.length
-                ? ` · ${actor.orgs.map((o) => o.name).join(", ")}`
-                : ""}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {actor.role !== "paciente" && actor.orgs.length > 1 && (
-              <select
-                value={actor.activeOrg?.id ?? ""}
-                onChange={async (e) => {
-                  await fetch("/api/auth/switch-org", {
-                    method: "POST",
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ organizationId: e.target.value }),
-                  });
-                  router.refresh();
-                }}
-                className="rounded-pill border border-hairline bg-surface px-2.5 py-1.5 text-[12px] font-medium text-ink"
-              >
-                {actor.orgs.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            <button
-              onClick={logout}
-              className="rounded-pill border border-hairline px-3.5 py-1.5 text-[12px] font-semibold text-muted transition-colors hover:border-ink hover:text-ink"
-            >
-              Salir
-            </button>
-          </div>
-        </header>
-
         <div ref={scrollRef} className="flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 py-6">
           {messages.length === 0 && (
             <div className="flex h-full flex-col justify-center gap-4">
@@ -144,7 +242,7 @@ export function ChatApp({ actor }: { actor: Actor }) {
                 {SCENARIOS[actor.role].map((s) => (
                   <button
                     key={s.label}
-                    onClick={() => sendMessage({ text: s.text })}
+                    onClick={() => sendMessage(s.text)}
                     className="rounded-pill border border-hairline bg-surface px-4 py-2 text-[13px] font-medium text-ink transition-colors hover:border-ink"
                   >
                     {s.label}
@@ -199,12 +297,12 @@ export function ChatApp({ actor }: { actor: Actor }) {
         }`}
       >
         {actor.role !== "recepcion" && (
-          <AgendaPanel actor={actor} onSend={(text) => sendMessage({ text })} />
+          <AgendaPanel actor={actor} onSend={sendMessage} />
         )}
         {actor.role !== "recepcion" && <CalendarPanel />}
         <ApprovalsPanel actor={actor} />
       </div>
-    </main>
+    </div>
   );
 }
 
