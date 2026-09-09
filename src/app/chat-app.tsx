@@ -82,12 +82,17 @@ export function ChatApp({ actor }: { actor: Actor }) {
     setInput("");
   }
 
+  const wide = actor.role !== "paciente";
   return (
-    <main className="mx-auto flex w-full max-w-5xl flex-col gap-4 p-4 md:h-[100dvh] md:flex-row md:overflow-hidden md:p-6">
+    <main
+      className={`mx-auto flex w-full flex-col gap-4 p-4 md:h-[100dvh] md:flex-row md:overflow-hidden md:p-6 ${
+        wide ? "max-w-6xl" : "max-w-4xl"
+      }`}
+    >
       <section className="flex min-h-[65vh] flex-1 flex-col overflow-hidden rounded-xl border border-hairline bg-surface shadow-card md:min-h-0">
         <header className="flex items-center justify-between border-b border-hairline px-5 py-3.5">
           <div className="space-y-0.5">
-            <h1 className="text-[15px] font-semibold tracking-tight text-ink">Secretario médico</h1>
+            <h1 className="text-[15px] font-semibold tracking-tight text-ink">CLAVDOA Secretario médico</h1>
             <p className="text-[12px] text-muted">
               {actor.name}
               {actor.specialty ? ` · ${actor.specialty}` : ` · ${ROLE_LABEL[actor.role]}`}
@@ -160,10 +165,15 @@ export function ChatApp({ actor }: { actor: Actor }) {
         </form>
       </section>
 
-      <div className="flex w-full flex-col gap-4 overflow-y-auto md:min-h-0 md:w-80">
+      <div
+        className={`flex w-full flex-col gap-4 overflow-y-auto md:min-h-0 ${
+          actor.role === "paciente" ? "md:w-72" : "md:w-96"
+        }`}
+      >
         {actor.role !== "recepcion" && (
           <AgendaPanel actor={actor} onSend={(text) => sendMessage({ text })} />
         )}
+        {actor.role !== "recepcion" && <CalendarPanel />}
         <ApprovalsPanel actor={actor} />
       </div>
     </main>
@@ -514,6 +524,83 @@ function AgendaPanel({ actor, onSend }: { actor: Actor; onSend: (t: string) => v
   }
 
   return null;
+}
+
+type CalItem = {
+  time: string;
+  who: string;
+  reason: string;
+  status: "scheduled" | "in-progress" | "completed" | "cancelled";
+  birthday: boolean;
+  estimated?: string;
+};
+type CalData = { title: string; days: { date: string; label: string; free?: number; items: CalItem[] }[] };
+
+const STATUS_DOT: Record<CalItem["status"], string> = {
+  scheduled: "bg-hairline-strong",
+  "in-progress": "bg-[#2e7d5b]",
+  completed: "bg-[#2e7d5b]/40",
+  cancelled: "bg-[#b23b3b]/50",
+};
+
+function CalendarPanel() {
+  const [data, setData] = useState<CalData | null>(null);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const r = await fetch("/api/calendar", { cache: "no-store" });
+        if (r.ok) setData(await r.json());
+      } catch {
+        /* ignore */
+      }
+    };
+    load();
+    const id = setInterval(load, 4000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!data) return null;
+
+  return (
+    <aside className={CARD}>
+      <h2 className="text-[15px] font-semibold tracking-tight text-ink">{data.title}</h2>
+      {data.days.length === 0 && (
+        <p className="text-[13px] text-muted">No hay turnos agendados.</p>
+      )}
+      <div className="space-y-3">
+        {data.days.map((d) => (
+          <div key={d.date} className="space-y-1.5">
+            <div className="flex items-baseline justify-between">
+              <p className="text-[12px] font-semibold capitalize text-ink">{d.label}</p>
+              {typeof d.free === "number" && (
+                <p className="text-[11px] text-muted">{d.free} libres</p>
+              )}
+            </div>
+            {d.items.map((it, i) => (
+              <div key={i} className="flex gap-2.5 rounded-lg border border-hairline px-2.5 py-2">
+                <span
+                  className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[it.status]}`}
+                  aria-hidden
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[12px] font-semibold tabular-nums text-ink">
+                    {it.time}
+                    {it.estimated && it.estimated !== it.time && (
+                      <span className="ml-1 font-normal text-[#9a6a1f]">~{it.estimated}</span>
+                    )}
+                    {it.birthday && <span className="ml-1"> 🎂</span>}
+                  </p>
+                  <p className="truncate text-[12px] text-ink/90">{it.who}</p>
+                  <p className="truncate text-[11px] text-muted">{it.reason}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </aside>
+  );
 }
 
 function ApprovalsPanel({ actor }: { actor: Actor }) {

@@ -350,6 +350,25 @@ export function inProgressAppointment(providerId: string, date: string): Appoint
   return r ? toAppointment(r) : undefined;
 }
 
+/** Every appointment of a professional, any date, oldest first. */
+export function providerAppointments(providerId: string): Appointment[] {
+  return (
+    getDb()
+      .prepare("SELECT * FROM appointments WHERE provider_id = ? ORDER BY start")
+      .all(providerId) as Row[]
+  ).map(toAppointment);
+}
+
+export function freeSlotCount(providerId: string, date: string): number {
+  return (
+    getDb()
+      .prepare(
+        "SELECT COUNT(*) AS n FROM slots WHERE provider_id = ? AND taken = 0 AND substr(start,1,10) = ?",
+      )
+      .get(providerId, date) as { n: number }
+  ).n;
+}
+
 /** The provider's next not-yet-started appointment for a day. */
 export function nextScheduledAppointment(providerId: string, date: string): Appointment | undefined {
   const r = getDb()

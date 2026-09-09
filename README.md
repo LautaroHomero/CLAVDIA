@@ -29,6 +29,12 @@ Construido para el _Plaude Engineering Challenge_.
 | **Recepción** | Sofía | Agendar / cancelar / reprogramar, tomar pedidos de receta, facturación — relatando lo que pide cada paciente | Dispara `requestHumanApproval` hacia el/la médico/a. |
 | **Paciente** | María Gómez / Jorge Fernández | Ver **su** ficha y turnos, sacar/cancelar turnos, pedir su receta | Todo lo sensible se escala. Solo ve su propio registro (forzado en el servidor). |
 
+La pantalla difiere por rol: el **profesional** ve un panel más ancho con
+"Consultorio · ahora" (paciente en atención + botones iniciar/terminar) y un
+mini-calendario **"Mi agenda"** con todos sus turnos y huecos libres por día; el
+**paciente** ve "Tu turno de hoy" y un calendario **"Mis turnos"** solo con los
+suyos.
+
 Las reglas de cada rol viven en [`src/lib/agent/roles/<rol>.md`](src/lib/agent/roles)
 y se anexan a la base [`instructions.md`](src/lib/agent/instructions.md). El
 servidor además limita el **set de herramientas** por rol
@@ -206,7 +212,8 @@ Socket Mode. Acá Slack llama al webhook `/api/slack/actions` (ya en el manifies
 src/
 ├── app/
 │   ├── page.tsx                  server: valida sesión → redirect /login o <ChatApp>
-│   ├── chat-app.tsx              cliente: chat + panel de aprobaciones (por rol)
+│   ├── chat-app.tsx              cliente: chat + panel lateral por rol (agenda en vivo,
+│   │                               "Mi agenda"/"Mis turnos" mini-calendario, aprobaciones)
 │   ├── login/page.tsx            selector de usuario + PIN
 │   └── api/
 │       ├── auth/{login,logout,me,users}   sesión (kind + nombre + PIN scrypt, cookie firmada)

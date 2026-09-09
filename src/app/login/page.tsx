@@ -37,7 +37,7 @@ export default function LoginPage() {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-[420px] flex-col justify-center gap-7 px-6 py-10">
       <header className="space-y-1.5">
-        <h1 className="text-[18px] font-semibold tracking-tight text-ink">Secretario médico</h1>
+        <h1 className="text-[18px] font-semibold tracking-tight text-ink">CLAVDIA Secretario médico</h1>
         <p className="text-[14px] text-muted">Ingresá para hablar con el agente.</p>
       </header>
 
