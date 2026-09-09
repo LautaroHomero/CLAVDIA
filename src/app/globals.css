@@ -19,6 +19,7 @@
   --radius-md: 10px;
   --radius-lg: 12px;
   --radius-xl: 16px;
+  --radius-pill: 9999px;
 
   --shadow-card: 0 16px 20px 0 rgba(0, 0, 0, 0.04);
 

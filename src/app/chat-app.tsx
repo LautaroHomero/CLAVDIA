@@ -64,7 +64,9 @@ export function ChatApp({ actor }: { actor: Actor }) {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
   }, [messages, status]);
 
   async function logout() {
@@ -81,35 +83,36 @@ export function ChatApp({ actor }: { actor: Actor }) {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-4 p-4 md:flex-row md:p-6">
-      <section className="flex min-h-[72vh] flex-1 flex-col overflow-hidden rounded-xl border border-hairline bg-surface shadow-card">
-        <header className="flex items-center justify-between border-b border-hairline px-5 py-4">
+    <main className="mx-auto flex w-full max-w-5xl flex-col gap-4 p-4 md:h-[100dvh] md:flex-row md:overflow-hidden md:p-6">
+      <section className="flex min-h-[65vh] flex-1 flex-col overflow-hidden rounded-xl border border-hairline bg-surface shadow-card md:min-h-0">
+        <header className="flex items-center justify-between border-b border-hairline px-5 py-3.5">
           <div className="space-y-0.5">
-            <h1 className="text-[17px] font-semibold tracking-tight text-ink">
-              Secretario médico · agente
-            </h1>
-            <p className="text-[13px] text-muted">
-              {actor.name} · <span className="font-semibold text-ink">{ROLE_LABEL[actor.role]}</span>
+            <h1 className="text-[15px] font-semibold tracking-tight text-ink">Secretario médico</h1>
+            <p className="text-[12px] text-muted">
+              {actor.name}
+              {actor.specialty ? ` · ${actor.specialty}` : ` · ${ROLE_LABEL[actor.role]}`}
             </p>
           </div>
           <button
             onClick={logout}
-            className="rounded-md border border-hairline px-3 py-1.5 text-[13px] font-semibold text-ink transition-colors hover:border-ink"
+            className="rounded-pill border border-hairline px-3.5 py-1.5 text-[12px] font-semibold text-muted transition-colors hover:border-ink hover:text-ink"
           >
-            Cerrar sesión
+            Salir
           </button>
         </header>
 
-        <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+        <div ref={scrollRef} className="flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 py-6">
           {messages.length === 0 && (
-            <div className="space-y-3">
-              <p className="text-[14px] text-muted">Probá un escenario o escribí un mensaje:</p>
-              <div className="flex flex-wrap gap-2">
+            <div className="flex h-full flex-col justify-center gap-4">
+              <p className="text-center text-[14px] text-muted">
+                ¿En qué te ayudo? Probá uno de estos:
+              </p>
+              <div className="flex flex-wrap justify-center gap-2">
                 {SCENARIOS[actor.role].map((s) => (
                   <button
                     key={s.label}
                     onClick={() => sendMessage({ text: s.text })}
-                    className="rounded-full border border-hairline bg-surface px-3.5 py-1.5 text-[13px] font-medium text-ink transition-colors hover:border-ink"
+                    className="rounded-pill border border-hairline bg-surface px-4 py-2 text-[13px] font-medium text-ink transition-colors hover:border-ink"
                   >
                     {s.label}
                   </button>
@@ -122,7 +125,11 @@ export function ChatApp({ actor }: { actor: Actor }) {
             <MessageBubble key={m.id} role={m.role} parts={m.parts as Part[]} />
           ))}
 
-          {busy && <p className="text-[13px] text-muted">el agente está trabajando…</p>}
+          {status === "submitted" && (
+            <p className="text-[12px] text-muted">
+              <span className="animate-pulse">●</span> pensando…
+            </p>
+          )}
           {error && (
             <p className="text-[13px] text-[#c0392b]">
               Error: {error.message}. ¿Está seteada <code>ANTHROPIC_API_KEY</code> y con saldo?
@@ -135,18 +142,18 @@ export function ChatApp({ actor }: { actor: Actor }) {
             e.preventDefault();
             submit();
           }}
-          className="flex gap-2 border-t border-hairline p-4"
+          className="flex items-center gap-2 border-t border-hairline p-3.5"
         >
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={actor.role === "paciente" ? "Escribí tu consulta…" : "Escribí acá…"}
-            className="flex-1 rounded-md border border-hairline bg-surface px-3.5 py-2.5 text-[16px] text-ink placeholder:text-muted/70 transition-colors focus:border-ink focus:outline-none"
+            placeholder={actor.role === "paciente" ? "Escribí tu consulta…" : "Escribí un mensaje…"}
+            className="flex-1 rounded-pill border border-hairline bg-canvas px-4 py-2.5 text-[15px] text-ink placeholder:text-muted/70 transition-colors focus:border-ink focus:bg-surface focus:outline-none"
           />
           <button
             type="submit"
             disabled={busy || !input.trim()}
-            className="rounded-md bg-ink px-5 py-2.5 text-[15px] font-semibold text-white transition-colors hover:bg-ink-hover disabled:opacity-40"
+            className="shrink-0 rounded-pill bg-ink px-5 py-2.5 text-[14px] font-semibold text-white transition-colors hover:bg-ink-hover disabled:opacity-40"
           >
             Enviar
           </button>
@@ -161,15 +168,22 @@ export function ChatApp({ actor }: { actor: Actor }) {
 type Part = { type: string; [k: string]: unknown };
 
 function renderInline(text: string, keyBase: string) {
-  return text.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
-    /^\*\*[^*]+\*\*$/.test(p) ? (
-      <strong key={`${keyBase}-${i}`} className="font-semibold">
-        {p.slice(2, -2)}
-      </strong>
-    ) : (
-      <span key={`${keyBase}-${i}`}>{p}</span>
-    ),
-  );
+  return text.split(/(\*\*[^*]+\*\*|\*[^*\n]+\*)/g).map((p, i) => {
+    const key = `${keyBase}-${i}`;
+    if (/^\*\*[^*]+\*\*$/.test(p))
+      return (
+        <strong key={key} className="font-semibold">
+          {p.slice(2, -2)}
+        </strong>
+      );
+    if (/^\*[^*\n]+\*$/.test(p))
+      return (
+        <em key={key} className="italic">
+          {p.slice(1, -1)}
+        </em>
+      );
+    return <span key={key}>{p}</span>;
+  });
 }
 
 /** Minimal Markdown for the agent's replies: headings, bold, bullets, quotes, rules. */
@@ -221,73 +235,76 @@ function Markdown({ text }: { text: string }) {
   return <div className="space-y-1.5">{blocks}</div>;
 }
 
-function MessageBubble({ role, parts }: { role: string; parts: Part[] }) {
-  const isUser = role === "user";
+const TOOL_LABELS: Record<string, string> = {
+  getClinicInfo: "Datos del consultorio",
+  findPatient: "Buscando al paciente",
+  getPatientBriefing: "Resumen del paciente",
+  listMyAgenda: "Agenda",
+  listPendingApprovals: "Bandeja de aprobaciones",
+  listAvailableSlots: "Turnos disponibles",
+  scheduleAppointment: "Agendando turno",
+  cancelAppointment: "Cancelando turno",
+  rescheduleAppointment: "Reprogramando turno",
+  createPrescriptionRenewal: "Renovación de receta",
+  sendPatientMessage: "Mensaje al paciente",
+  refundInvoice: "Reembolso",
+  registerPatient: "Alta de paciente",
+  registerProfessional: "Alta de profesional",
+  requestHumanApproval: "Pedido de aprobación",
+  askHumanInput: "Consulta a una persona",
+};
+
+function toolNameOf(part: Part): string {
+  return part.type === "dynamic-tool"
+    ? String((part as { toolName?: string }).toolName ?? "tool")
+    : part.type.slice(5);
+}
+
+function ToolLine({ part }: { part: Part }) {
+  const name = toolNameOf(part);
+  const done = String((part as { state?: string }).state ?? "") === "output-available";
+  const label = TOOL_LABELS[name] ?? name;
+  const hitl = name === "requestHumanApproval" || name === "askHumanInput";
+
+  if (hitl && !done) {
+    return (
+      <p className="pl-0.5 text-[13px] font-medium text-[#9a6a1f]">
+        ⏸ Esperando la respuesta de una persona…
+      </p>
+    );
+  }
   return (
-    <div className={isUser ? "flex justify-end" : "flex justify-start"}>
-      <div
-        className={`max-w-[85%] space-y-2 rounded-xl px-4 py-2.5 text-[15px] leading-relaxed ${
-          isUser
-            ? "bg-ink text-white"
-            : "border border-hairline bg-canvas text-ink"
-        }`}
-      >
-        {parts.map((part, i) => {
-          if (part.type === "text") {
-            const text = String((part as { text?: string }).text ?? "");
-            return isUser ? (
-              <p key={i} className="whitespace-pre-wrap">
-                {text}
-              </p>
-            ) : (
-              <Markdown key={i} text={text} />
-            );
-          }
-          if (part.type === "reasoning" || part.type === "step-start") return null;
-          if (part.type === "dynamic-tool" || part.type.startsWith("tool-")) {
-            const name =
-              part.type === "dynamic-tool"
-                ? String((part as { toolName?: string }).toolName ?? "tool")
-                : part.type.slice(5);
-            return <ToolChip key={i} name={name} part={part} dark={isUser} />;
-          }
-          return null;
-        })}
-      </div>
-    </div>
+    <p className="flex items-center gap-1.5 pl-0.5 text-[12px] text-muted">
+      <span className={done ? "text-[#2e7d5b]" : "animate-pulse"}>{done ? "✓" : "○"}</span>
+      {label}
+    </p>
   );
 }
 
-function ToolChip({ name, part, dark }: { name: string; part: Part; dark: boolean }) {
-  const [open, setOpen] = useState(false);
-  const state = String((part as { state?: string }).state ?? "");
-  const waiting =
-    (name === "requestHumanApproval" || name === "askHumanInput") && state !== "output-available";
+function MessageBubble({ role, parts }: { role: string; parts: Part[] }) {
+  const isUser = role === "user";
+  const toolParts = parts.filter(
+    (p) => p.type === "dynamic-tool" || p.type.startsWith("tool-"),
+  );
+  const text = parts
+    .filter((p) => p.type === "text")
+    .map((p) => String((p as { text?: string }).text ?? ""))
+    .join("\n")
+    .trim();
 
   return (
-    <div
-      className={`rounded-md border px-2.5 py-1.5 text-[12px] ${
-        dark ? "border-white/20" : "border-hairline bg-surface"
-      }`}
-    >
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 text-left font-mono"
-      >
-        <span>{waiting ? "⏸" : "🔧"}</span>
-        <span className="font-semibold">{name}</span>
-        <span className={dark ? "text-white/60" : "text-muted"}>
-          {waiting ? "esperando a un humano…" : state}
-        </span>
-      </button>
-      {open && (
-        <pre className="mt-1.5 max-h-48 overflow-auto rounded-sm bg-ink p-2 text-[11px] text-white/90">
-          {JSON.stringify(
-            { input: (part as { input?: unknown }).input, output: (part as { output?: unknown }).output },
-            null,
-            2,
-          )}
-        </pre>
+    <div className="space-y-2">
+      {!isUser && toolParts.map((p, i) => <ToolLine key={i} part={p} />)}
+      {(text || isUser) && (
+        <div className={isUser ? "flex justify-end" : "flex justify-start"}>
+          <div
+            className={`max-w-[85%] rounded-xl px-4 py-2.5 text-[15px] leading-relaxed ${
+              isUser ? "bg-ink text-white" : "bg-canvas text-ink"
+            }`}
+          >
+            {isUser ? <p className="whitespace-pre-wrap">{text}</p> : <Markdown text={text} />}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -317,7 +334,7 @@ function ApprovalsPanel({ actor }: { actor: Actor }) {
   const readOnly = actor.role === "paciente";
 
   return (
-    <aside className="flex w-full flex-col gap-3 rounded-xl border border-hairline bg-surface p-5 shadow-card md:w-96">
+    <aside className="flex w-full flex-col gap-3 overflow-y-auto rounded-xl border border-hairline bg-surface p-5 shadow-card md:min-h-0 md:w-80">
       <div className="flex items-center justify-between">
         <h2 className="text-[15px] font-semibold tracking-tight text-ink">{PANEL_TITLE[actor.role]}</h2>
         <span
