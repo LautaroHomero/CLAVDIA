@@ -1,16 +1,13 @@
-import { getWorkflowMetadata, sleep } from "workflow";
+import { getWorkflowMetadata } from "workflow";
 import type {
   HumanRequestKind,
   HumanResponse,
   PendingHumanRequest,
   RiskLevel,
 } from "@/lib/approvals/types";
-import { addPendingRequest, removePendingRequest } from "@/lib/approvals/registry";
+import { addPendingRequest, resolvePendingRequest } from "@/lib/approvals/registry";
 import { isSlackEnabled, postHumanRequest, updateResolvedMessage } from "@/lib/slack/client";
 import { humanHook } from "./hooks";
-
-/** How long the workflow waits for a human before falling back. */
-const HUMAN_TIMEOUT = "24h";
 
 export interface RequestHumanArgs {
   token: string;
@@ -21,25 +18,21 @@ export interface RequestHumanArgs {
   riskLevel?: RiskLevel;
   patientName?: string;
   question?: string;
+  /** Name of the person whose chat triggered this. */
+  requestedBy?: string;
 }
 
 /**
  * Suspends the workflow until a human responds via the web UI or Slack.
  * Runs in workflow context (not a step) because it awaits a hook.
+ *
+ * The wait is durable and unbounded — the run consumes no resources while
+ * suspended, and survives restarts/deploys. (A bounded wait could be layered on
+ * with an external `Run.wakeUp()` on a schedule.)
  */
 export async function requestHuman(args: RequestHumanArgs): Promise<HumanResponse> {
   const pending = await notifyHuman(args);
-
-  const timeout = sleep(HUMAN_TIMEOUT).then<HumanResponse>(() => ({
-    approved: args.kind === "approval" ? false : undefined,
-    answer: args.kind === "input" ? "" : undefined,
-    timedOut: true,
-    note: `Sin respuesta humana dentro de ${HUMAN_TIMEOUT}.`,
-    respondedBy: "sistema (timeout)",
-  }));
-
-  const response = await Promise.race([humanHook.create({ token: args.token }), timeout]);
-
+  const response = await humanHook.create({ token: args.token });
   await finalizeHuman(pending, response);
   return response;
 }
@@ -60,6 +53,7 @@ async function notifyHuman(args: RequestHumanArgs): Promise<PendingHumanRequest>
     riskLevel: args.riskLevel,
     patientName: args.patientName,
     question: args.question,
+    requestedBy: args.requestedBy,
     createdAt: new Date().toISOString(),
     channels: ["in-app"],
   };
@@ -94,5 +88,5 @@ async function finalizeHuman(
         }`;
 
   await updateResolvedMessage(req, outcome);
-  removePendingRequest(req.token);
+  resolvePendingRequest(req.token, response);
 }

@@ -4,7 +4,7 @@ import {
   getPatient,
   getProvider,
   getUpcomingAppointments,
-} from "./store";
+} from "@/lib/db/repo";
 
 export interface PatientBriefing {
   found: boolean;

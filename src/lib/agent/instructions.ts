@@ -1,17 +1,20 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-
-const INSTRUCTIONS_PATH = "src/lib/agent/instructions.md";
+import type { Role } from "@/lib/domain/types";
 
 /**
- * The agent's behaviour is defined entirely by the plain-text file
- * `instructions.md` in this folder, so it can be edited without touching code.
+ * The agent's behaviour is defined by plain-text files:
+ *   - src/lib/agent/instructions.md        (shared base)
+ *   - src/lib/agent/roles/<role>.md        (médico / recepción / paciente)
  *
- * It is read inside a `"use step"` function: Node built-ins (`fs`, `path`) are
- * not available in workflow code itself, only inside steps. `next.config.ts`
- * traces the file into the deployment bundle via `outputFileTracingIncludes`.
+ * Read inside a `"use step"` function because Node built-ins (`fs`, `path`) are
+ * not available in workflow code. `next.config.ts` traces the folder into the
+ * deployment bundle.
  */
-export async function loadAgentInstructions(): Promise<string> {
+export async function loadAgentInstructions(role: Role): Promise<string> {
   "use step";
-  return readFileSync(join(process.cwd(), INSTRUCTIONS_PATH), "utf8");
+  const root = process.cwd();
+  const base = readFileSync(join(root, "src/lib/agent/instructions.md"), "utf8");
+  const roleDoc = readFileSync(join(root, `src/lib/agent/roles/${role}.md`), "utf8");
+  return `${base}\n\n${roleDoc}`;
 }

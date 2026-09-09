@@ -19,6 +19,8 @@ export interface PendingHumanRequest {
   patientName?: string;
   /** For input requests: the concrete question. */
   question?: string;
+  /** Name of the person whose chat triggered this (e.g. "Recepción (Sofía)"). */
+  requestedBy?: string;
   createdAt: string;
   /** Where the notification was delivered. */
   channels: ("slack" | "in-app")[];

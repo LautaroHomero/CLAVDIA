@@ -1,133 +1,169 @@
 # Secretario médico · agente con aprobación humana
 
-Un agente de **secretaría médica** cuyo comportamiento se define en un archivo de
-**texto plano** ([`src/lib/agent/instructions.md`](src/lib/agent/instructions.md))
-y que ejecuta un flujo **human-in-the-loop**: cuando una acción es sensible
-(renovar una receta, reembolsar una factura alta, un pedido ambiguo…), el agente
-**pausa el workflow** y le pide a una persona que apruebe o aclare — por **Slack**
-o desde la propia UI — y recién entonces continúa.
+Un agente de **secretaría médica** cuyo comportamiento se define en **texto plano**
+([`src/lib/agent/`](src/lib/agent)) y que ejecuta un flujo **human-in-the-loop**:
+cuando una acción es sensible (renovar una receta, reembolsar una factura alta, un
+pedido ambiguo…), **pausa el workflow** y le pide a una persona que apruebe o
+aclare — por **Slack** o desde la propia UI — y recién entonces continúa.
 
-Construido para el _Plaude Engineering Challenge_ con:
+Cada persona entra con **usuario + PIN** y, según su rol (**médico/a**,
+**recepción** o **paciente**), el agente cambia sus instrucciones, las
+herramientas disponibles y a qué datos puede acceder.
+
+Construido para el _Plaude Engineering Challenge_.
 
 | Requisito del challenge | Implementación |
 | --- | --- |
-| UI en Next.js para interactuar con el agente | App Router + `useChat` — [`src/app/page.tsx`](src/app/page.tsx) |
+| UI en Next.js para interactuar con el agente | App Router + `useChat`, con login por rol — [`src/app`](src/app) |
 | Agente con `DurableAgent` (Workflow DevKit) + paso HITL por Slack | [`src/workflows/secretary/`](src/workflows/secretary) |
-| Instrucciones en texto plano con escenarios de aprobación | [`src/lib/agent/instructions.md`](src/lib/agent/instructions.md) |
+| Instrucciones en texto plano con escenarios de aprobación | [`src/lib/agent/instructions.md`](src/lib/agent/instructions.md) + [`roles/*.md`](src/lib/agent/roles) |
 | Repo en GitHub + README | este repo |
+
+---
+
+## Roles
+
+| Rol | Entra como | Qué le pide al agente | Aprobaciones |
+| --- | --- | --- | --- |
+| **Médico/a** | Dra. Ruiz / Dr. Sosa | Su agenda, fichas de pacientes, su **bandeja de aprobaciones**, renovar recetas | Es la autoridad: actúa directo. No genera aprobaciones (solo `askHumanInput` ante ambigüedad real). |
+| **Recepción** | Sofía | Agendar / cancelar / reprogramar, tomar pedidos de receta, facturación — relatando lo que pide cada paciente | Dispara `requestHumanApproval` hacia el/la médico/a. |
+| **Paciente** | María Gómez / Jorge Fernández | Ver **su** ficha y turnos, sacar/cancelar turnos, pedir su receta | Todo lo sensible se escala. Solo ve su propio registro (forzado en el servidor). |
+
+Las reglas de cada rol viven en [`src/lib/agent/roles/<rol>.md`](src/lib/agent/roles)
+y se anexan a la base [`instructions.md`](src/lib/agent/instructions.md). El
+servidor además limita el **set de herramientas** por rol
+([`TOOLS_BY_ROLE`](src/workflows/secretary/tools.ts)) y pasa el `Actor` a cada
+tool para acotar los datos (un paciente nunca ve otra ficha).
+
+### Usuarios de demo (PIN)
+
+| Usuario | Rol | PIN |
+| --- | --- | --- |
+| Dra. Elena Ruiz | médico/a | `2468` |
+| Dr. Martín Sosa | médico/a | `1357` |
+| Recepción (Sofía) | recepción | `1234` |
+| María Gómez | paciente | `1111` |
+| Jorge Fernández | paciente | `2222` |
 
 ---
 
 ## Cómo funciona
 
 ```
-Paciente ─► /api/chat ─► start(secretaryWorkflow)         (Workflow DevKit)
-                              │
-                              ├─ loadAgentInstructions()   "use step"  (lee instructions.md)
-                              ├─ DurableAgent.stream(...)   loop del agente (LLM en steps durables)
-                              │     │
-                              │     ├─ tools de secretaría  "use step": agenda, recetas, facturación…
-                              │     │
-                              │     └─ requestHumanApproval / askHumanInput
-                              │            │
-                              │            ├─ notifyHuman()  "use step"  ──► Slack (chat.postMessage)
-                              │            │                             └─► registro en memoria (panel de la UI)
-                              │            │
-                              │            ▼   el workflow SE SUSPENDE en un hook (0 recursos)
-                              │        await humanHook  ◄──── resumeHook(token, decisión)
-                              │            ▲                        │
-                              │            │           ┌───────────┴───────────┐
-                              │            │       POST /api/approvals   POST /api/slack/actions
-                              │            │       (botones de la UI)    (botones de Slack, firma verificada)
-                              │            │
-                              │            └─ finalizeHuman() "use step" ──► actualiza el mensaje de Slack
-                              │
-                              └─ stream de respuesta ─► UI (SSE)
+Login (usuario + PIN) ─► cookie de sesión firmada (Actor: userId, role, patientId?/providerId?)
+        │
+Paciente/Recepción/Médico ─► /api/chat  ─► start(secretaryWorkflow, [messages, actor])
+                                              │
+                                              ├─ loadAgentInstructions(role)  "use step"  (base + roles/<role>.md)
+                                              ├─ DurableAgent.stream({ activeTools: TOOLS_BY_ROLE[role],
+                                              │                        experimental_context: actor })
+                                              │     ├─ tools de secretaría  "use step"  ─► SQLite (data/clinic.db)
+                                              │     └─ requestHumanApproval / askHumanInput
+                                              │            │
+                                              │            ├─ notifyHuman()  "use step"  ─► Slack (chat.postMessage)
+                                              │            │                             └─► fila en SQLite (pending_requests)
+                                              │            ▼   el workflow SE SUSPENDE en un hook (0 recursos, durable)
+                                              │        await humanHook  ◄──── resumeHook(token, decisión)
+                                              │            ▲                        │
+                                              │            │           ┌───────────┴───────────┐
+                                              │            │     POST /api/approvals     POST /api/slack/actions
+                                              │            │     (panel de la UI)        (botones de Slack, firma verificada)
+                                              │            └─ finalizeHuman() "use step" ─► actualiza Slack + marca resuelto
+                                              │
+                                              └─ stream de respuesta ─► UI (SSE)
 ```
 
-- **El token del hook es el `toolCallId`** de la llamada del agente. Así, los dos
+- **El token del hook es el `toolCallId`** de la llamada del agente: los dos
   endpoints que reanudan el flujo (UI y Slack) no necesitan estado extra.
-- Si Slack **no** está configurado, el pedido igual aparece en el panel
-  **"Pendientes de un humano"** de la UI. El repo funciona con solo clonar +
-  `ANTHROPIC_API_KEY`.
-- La suspensión es **durable**: el workflow puede esperar horas o días (hay un
-  timeout de 24 h configurable) y sobrevive a redeploys y reinicios.
+- La **fila de pendientes vive en SQLite**, así que el paso del workflow, la UI y
+  el webhook de Slack ven lo mismo (un `Map` en memoria no sobrevive al
+  aislamiento por-step del Workflow DevKit).
+- Sin Slack configurado, el pedido aparece igual en el panel de la UI.
+- La suspensión es **durable e ilimitada**: no consume recursos y sobrevive a
+  reinicios y redeploys.
 
 ---
 
-## Escenarios de aprobación (definidos en `instructions.md`)
+## Escenarios de aprobación (en `instructions.md`)
 
-| Situación | Herramienta | Qué pasa |
+| Situación | Herramienta | Nota |
 | --- | --- | --- |
-| Briefing del paciente | `getPatientBriefing` | El agente **siempre** arranca resumiendo al paciente (antecedentes, alergias, medicación, turnos, pendientes) antes de atender. |
-| Renovación de receta | `requestHumanApproval` → `createPrescriptionRenewal` | Siempre la aprueba el médico. |
-| Reembolso ≥ $50.000 o motivo poco claro | `requestHumanApproval` → `refundInvoice` | Aprobación de administración. |
-| Cancelar/reprogramar < 24 h o estudio caro | `requestHumanApproval` → `cancelAppointment` | Aprobación de recepción. |
-| Sobreturno / urgencia / fuera de horario | `requestHumanApproval` → `scheduleAppointment` | Aprobación del médico. |
-| Enviar resultados / datos clínicos al paciente | `requestHumanApproval` → `sendPatientMessage` | Aprobación explícita. |
-| Identidad ambigua / intención poco clara / falta un dato | `askHumanInput` | El agente pide una aclaración concreta y sigue esa indicación. |
-| Consulta clínica ("¿es grave?", "¿qué tomo?") | — | El agente **no** responde: deriva al profesional. |
-
-> Las reglas viven en el prompt de texto plano, no en el código. Editá
-> `instructions.md` y cambiás el comportamiento sin recompilar.
+| Briefing del paciente | `getPatientBriefing` | El agente **siempre** arranca resumiendo (antecedentes, alergias, medicación, turnos, pendientes). |
+| Renovación de receta | `requestHumanApproval` → `createPrescriptionRenewal` | Recepción/paciente la escalan; el/la médico/a la hace directo. |
+| Reembolso ≥ $50.000 o motivo poco claro | `requestHumanApproval` → `refundInvoice` | |
+| Cancelar/reprogramar < 24 h o estudio caro | `requestHumanApproval` → `cancelAppointment` | |
+| Sobreturno / urgencia / fuera de horario | `requestHumanApproval` → `scheduleAppointment` | |
+| Enviar resultados o datos clínicos al paciente | `requestHumanApproval` → `sendPatientMessage` | |
+| Identidad ambigua / falta un dato | `askHumanInput` | Homónimos (María vs. Mario Gómez), datos que no cierran. |
+| Consulta clínica ("¿es grave?") | — | El agente no responde: deriva al profesional. |
 
 ---
 
 ## Puesta en marcha
 
-Requisitos: **Node ≥ 20** y una API key de Anthropic.
+Requisitos: **Node ≥ 20**, herramientas de compilación de C (para `better-sqlite3`)
+y una API key de Anthropic con saldo.
 
 ```bash
 git clone <este-repo>
 cd plaude-medical-secretary
 npm install
-cp .env.example .env.local     # completá ANTHROPIC_API_KEY
+cp .env.example .env.local     # completá ANTHROPIC_API_KEY (y AUTH_SECRET)
 npm run dev                     # http://localhost:3000
 ```
 
-Abrí la app, probá un escenario del panel izquierdo y resolvé las aprobaciones
-en el panel derecho.
+En el primer arranque se crea y siembra `data/clinic.db` (SQLite, gitignored).
+Entrá, elegí un usuario, ingresá su PIN (tabla de arriba) y probá los escenarios.
 
-Observabilidad de los workflows (runs, steps, reintentos, suspensiones):
-
-```bash
-npx workflow web
-```
+- Si `better-sqlite3` no carga: `npm rebuild better-sqlite3`.
+- Observabilidad de los workflows: `npx workflow web`.
 
 ### Variables de entorno
 
 | Variable | Requerida | Descripción |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | ✅ | Modelo del agente. https://console.anthropic.com |
+| `ANTHROPIC_API_KEY` | ✅ | Modelo del agente. https://console.anthropic.com (necesita saldo). |
+| `AUTH_SECRET` | recomendada | Firma la cookie de sesión. Sin ella usa un default de dev. |
 | `AGENT_MODEL` | — | Id de modelo Anthropic. Default `claude-sonnet-4-5`. |
-| `SLACK_BOT_TOKEN` | — | Bot token (`xoxb-…`). Si falta, el HITL usa solo la UI. |
-| `SLACK_SIGNING_SECRET` | — | Para verificar la firma de los webhooks de Slack. |
+| `SLACK_BOT_TOKEN` | — | Bot token (`xoxb-…`). Sin esto, el HITL usa solo la UI. |
+| `SLACK_SIGNING_SECRET` | — | Verifica la firma de los webhooks de Slack. |
 | `SLACK_APPROVAL_CHANNEL` | — | **ID** del canal de aprobaciones (ej. `C0123ABCDE`). |
 
 ---
 
 ## Conectar Slack (opcional)
 
-1. **Crear la app** en <https://api.slack.com/apps> → _Create New App_ → _From scratch_.
-2. **OAuth & Permissions** → _Bot Token Scopes_: `chat:write`, `chat:write.public`.
-   Instalá la app en el workspace y copiá el **Bot User OAuth Token** → `SLACK_BOT_TOKEN`.
-3. **Basic Information** → _Signing Secret_ → `SLACK_SIGNING_SECRET`.
-4. Creá un canal (ej. `#aprobaciones-medicas`), invitá al bot
-   (`/invite @tu-app`) y poné su **ID** en `SLACK_APPROVAL_CHANNEL`
-   (clic derecho en el canal → _Ver detalles_ → abajo del todo).
-5. **Interactivity & Shortcuts** → _On_ → _Request URL_:
-   `https://<tu-host-público>/api/slack/actions`.
-   En local, exponé el puerto con un túnel:
+1. <https://api.slack.com/apps> → **Create New App** → **From a manifest** → pegá:
 
-   ```bash
-   npx untun@latest tunnel http://localhost:3000
-   # o: cloudflared tunnel --url http://localhost:3000
+   ```json
+   {
+     "display_information": { "name": "Secretario Médico" },
+     "features": { "bot_user": { "display_name": "secretario-medico" } },
+     "oauth_config": { "scopes": { "bot": ["chat:write", "chat:write.public"] } },
+     "settings": {
+       "interactivity": {
+         "is_enabled": true,
+         "request_url": "https://<tu-host-público>/api/slack/actions"
+       }
+     }
+   }
    ```
 
-6. Reiniciá `npm run dev` con el `.env.local` completo. Ahora cada pedido de
-   aprobación llega a Slack con botones **Aprobar / Rechazar**; al hacer clic,
-   `resumeHook` reanuda el workflow. La UI y Slack son intercambiables: el
-   primero que responde, gana.
+2. **Install to Workspace** → copiá el **Bot User OAuth Token** (`xoxb-…`).
+3. **Basic Information → App Credentials → Signing Secret**.
+4. Creá un canal, invitá al bot (`/invite @secretario-medico`) y poné su **ID** en
+   `SLACK_APPROVAL_CHANNEL` (canal → _About_ → abajo del todo).
+5. En local, exponé el puerto y usá esa URL como _Request URL_:
+
+   ```bash
+   cloudflared tunnel --url http://localhost:3000
+   ```
+
+   (La URL de `trycloudflare.com` cambia en cada arranque: actualizá el _Request
+   URL_ de la app cada vez. Para algo estable, deploy a Vercel.)
+
+Ignorá la pantalla de "Install Slack CLI / `slack run`": eso es para apps Bolt en
+Socket Mode. Acá Slack llama al webhook `/api/slack/actions` (ya en el manifiesto).
 
 ---
 
@@ -136,42 +172,46 @@ npx workflow web
 ```
 src/
 ├── app/
-│   ├── page.tsx                     UI de chat + panel de aprobaciones
+│   ├── page.tsx                  server: valida sesión → redirect /login o <ChatApp>
+│   ├── chat-app.tsx              cliente: chat + panel de aprobaciones (por rol)
+│   ├── login/page.tsx            selector de usuario + PIN
 │   └── api/
-│       ├── chat/route.ts            start(secretaryWorkflow) + stream SSE
-│       ├── approvals/route.ts       GET pendientes · POST decisión (UI) → resumeHook
-│       └── slack/actions/route.ts   webhook de interactividad de Slack → resumeHook
+│       ├── auth/{login,logout,me,users}   sesión (cookie firmada, PIN con scrypt)
+│       ├── chat/route.ts         start(secretaryWorkflow, [messages, actor]) + stream SSE
+│       ├── approvals/route.ts    GET pendientes (scope por rol) · POST decisión → resumeHook
+│       └── slack/actions/route.ts  webhook de interactividad de Slack → resumeHook
 ├── workflows/secretary/
-│   ├── workflow.ts                  "use workflow": el DurableAgent
-│   ├── tools.ts                     herramientas ("use step") + requestHumanApproval / askHumanInput
-│   ├── hooks.ts                     defineHook<HumanResponse>()
-│   └── request-human.ts             suspende en el hook · notifica · timeout de 24 h
+│   ├── workflow.ts               "use workflow": DurableAgent, activeTools + context por rol
+│   ├── tools.ts                  herramientas ("use step") + TOOLS_BY_ROLE + human tools
+│   ├── hooks.ts                  defineHook<HumanResponse>()
+│   └── request-human.ts          suspende en el hook · notifica (Slack + DB)
 └── lib/
     ├── agent/
-    │   ├── instructions.md          ← comportamiento del agente (texto plano)
-    │   └── instructions.ts          lo lee en un "use step"
-    ├── domain/                      mock in-memory: pacientes, turnos, facturas, labs
-    │   ├── store.ts
-    │   └── briefing.ts              arma el resumen previo del paciente
-    ├── approvals/                   tipos + registro de pendientes (vista para la UI)
-    └── slack/                       Block Kit + cliente + verificación de firma
+    │   ├── instructions.md       comportamiento base (texto plano)
+    │   └── roles/{medico,recepcion,paciente}.md
+    ├── auth/{pin.ts,session.ts}  scrypt + cookie HMAC
+    ├── db/
+    │   ├── schema.ts  connection.ts  seed.ts   SQLite (better-sqlite3)
+    │   └── repo.ts               todas las queries tipadas
+    ├── domain/{types.ts,briefing.ts}
+    ├── approvals/{types.ts,registry.ts}   fila HITL (tabla pending_requests)
+    └── slack/{client.ts,blocks.ts}        Block Kit + verificación de firma
 ```
 
 ---
 
 ## Notas de producción
 
-Es un demo; para llevarlo a producción:
+Es un demo:
 
-- **Datos**: `src/lib/domain/store.ts` es un mock en memoria (se re-siembra en cada
-  arranque). Reemplazar por una base real — toda lectura/escritura ya pasa por
-  funciones chicas para facilitar el cambio.
-- **Registro de pendientes** (`src/lib/approvals/registry.ts`): estado local del
-  proceso. En multi-instancia, respaldarlo en Redis/Postgres. La fuente de verdad
-  ya es el hook del workflow; el registro es solo una vista para el panel.
-- **Deploy**: el Workflow DevKit está pensado para Vercel (persistencia y colas
-  gestionadas). En local corre con `next dev` sin infraestructura extra.
-- **PHI**: no usar datos reales de pacientes. Este repo no implementa los
-  controles de una historia clínica real (auditoría, cifrado, RBAC, HIPAA/HDS).
-- **Cumplimiento clínico**: el agente hace tareas administrativas y escala todo lo
-  clínico. No sustituye criterio médico.
+- **Base de datos**: SQLite local (`data/clinic.db`), sembrada en cada primer
+  arranque. Todas las queries pasan por `src/lib/db/repo.ts` — cambiar a Postgres
+  es reemplazar ese archivo y `connection.ts`.
+- **Auth**: usuario + PIN con `scrypt` y cookie firmada con HMAC. Suficiente para
+  el demo, no para producción (sin rate-limiting, rotación, MFA, etc.).
+- **Deploy**: el Workflow DevKit apunta a Vercel (persistencia y colas
+  gestionadas). SQLite local no aplica en serverless: ahí iría Turso/Postgres.
+- **PHI**: datos ficticios. Falta todo lo de una historia clínica real (auditoría,
+  cifrado en reposo, RBAC fino, HIPAA/HDS).
+- **Clínico**: el agente hace tareas administrativas y escala todo lo clínico. No
+  sustituye criterio médico.

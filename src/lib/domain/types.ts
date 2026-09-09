@@ -1,17 +1,37 @@
-// Domain model for a small medical practice.
-// This is a mock in-memory dataset — see `store.ts`.
+// Domain model for a small medical practice, backed by SQLite (see src/lib/db).
 
-export type ISODate = string; // e.g. "2026-09-14"
-export type ISODateTime = string; // e.g. "2026-09-14T10:30:00"
+export type ISODate = string; // "2026-09-14"
+export type ISODateTime = string; // "2026-09-14T10:30:00"
+
+export type Role = "medico" | "recepcion" | "paciente";
+
+export interface User {
+  id: string;
+  name: string;
+  role: Role;
+  /** Set when role === "paciente": the patient record this user is. */
+  patientId?: string;
+  /** Set when role === "medico": the provider record this user is. */
+  providerId?: string;
+}
+
+/** Who is talking to the agent — derived from the session, passed into the workflow. */
+export interface Actor {
+  userId: string;
+  name: string;
+  role: Role;
+  patientId?: string;
+  providerId?: string;
+}
 
 export interface Patient {
   id: string;
   fullName: string;
-  dni: string; // national ID
+  dni: string;
   dateOfBirth: ISODate;
   phone: string;
   email: string;
-  coverage: string; // insurer / plan
+  coverage: string;
   allergies: string[];
   activeConditions: string[];
   medications: Medication[];
@@ -60,7 +80,7 @@ export interface Invoice {
   patientId: string;
   date: ISODate;
   concept: string;
-  amount: number; // in ARS
+  amount: number; // ARS
   status: InvoiceStatus;
 }
 
