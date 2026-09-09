@@ -20,6 +20,7 @@ import {
 } from "@/lib/db/repo";
 import { buildPatientBriefing } from "@/lib/domain/briefing";
 import { listPendingRequests } from "@/lib/approvals/registry";
+import { DEMO_TODAY, DEMO_TOMORROW } from "@/lib/domain/clock";
 import type { Actor, Role } from "@/lib/domain/types";
 import { requestHuman } from "./request-human";
 
@@ -119,6 +120,7 @@ async function availableSlotsStep({ date, providerId }: { date?: string; provide
   "use step";
   const slots = listOpenSlots({ date, providerId }).slice(0, 20);
   return {
+    today: DEMO_TODAY,
     count: slots.length,
     slots: slots.map((s) => {
       const provider = getProvider(s.providerId);
@@ -139,6 +141,9 @@ async function myAgendaStep({ date }: { date?: string }, ctx: ToolCtx) {
   const providerId = actor?.role === "medico" ? actor.providerId : undefined;
   const appts = listAppointments({ providerId, date });
   return {
+    today: DEMO_TODAY,
+    tomorrow: DEMO_TOMORROW,
+    queriedDate: date ?? "todas las fechas",
     count: appts.length,
     scope: providerId ? getProvider(providerId)?.name : "todo el consultorio",
     appointments: appts.map((a) => {

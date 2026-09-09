@@ -5,6 +5,7 @@ import {
   getProvider,
   getUpcomingAppointments,
 } from "@/lib/db/repo";
+import { DEMO_TODAY } from "./clock";
 
 export interface PatientBriefing {
   found: boolean;
@@ -26,8 +27,8 @@ export interface PatientBriefing {
 }
 
 function ageFrom(dob: string): number {
-  const birth = new Date(dob);
-  const now = new Date("2026-09-09T00:00:00");
+  const birth = new Date(`${dob}T00:00:00`);
+  const now = new Date(`${DEMO_TODAY}T00:00:00`);
   let age = now.getFullYear() - birth.getFullYear();
   const m = now.getMonth() - birth.getMonth();
   if (m < 0 || (m === 0 && now.getDate() < birth.getDate())) age--;

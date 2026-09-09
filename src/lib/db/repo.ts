@@ -12,9 +12,10 @@ import type {
   Slot,
   User,
 } from "@/lib/domain/types";
+import { DEMO_TODAY } from "@/lib/domain/clock";
 import { getDb } from "./connection";
 
-const TODAY = "2026-09-09"; // demo "now"
+const TODAY = DEMO_TODAY;
 
 // ---------------------------------------------------------------------------
 // Row mappers

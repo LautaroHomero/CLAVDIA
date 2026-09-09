@@ -120,6 +120,15 @@ export function seedIfEmpty(db: Database): void {
     `);
     appt.run("apt_1001", "pat_gomez", "prov_ruiz", "2026-09-11T09:30:00", "Control de presión arterial");
     appt.run("apt_1002", "pat_fernandez", "prov_sosa", "2026-09-10T10:00:00", "Control de anticoagulación");
+    appt.run("apt_1003", "pat_ortiz", "prov_ruiz", "2026-09-10T09:30:00", "Chequeo anual");
+    appt.run("apt_1004", "pat_gomez_2", "prov_ruiz", "2026-09-10T11:00:00", "Control de asma");
+    // Mark the seeded appointment slots as taken.
+    db.prepare("UPDATE slots SET taken = 1 WHERE id IN (?, ?, ?, ?)").run(
+      "slot_prov_ruiz_2026-09-11_0930",
+      "slot_prov_sosa_2026-09-10_1000",
+      "slot_prov_ruiz_2026-09-10_0930",
+      "slot_prov_ruiz_2026-09-10_1100",
+    );
 
     const inv = db.prepare(
       "INSERT INTO invoices (id, patient_id, date, concept, amount, status) VALUES (?, ?, ?, ?, ?, ?)",
