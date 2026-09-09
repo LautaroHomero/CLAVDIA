@@ -1,5 +1,6 @@
 import type { Database } from "better-sqlite3";
 import { hashPin } from "@/lib/auth/pin";
+import { DEMO_MMDD, DEMO_TOMORROW, demoNextSlot, shiftIso } from "@/lib/domain/clock";
 import { generateSlotRows } from "./slots";
 
 /** Health professionals with their own agenda. `title` is baked into `name`. */
@@ -92,10 +93,11 @@ export function seedIfEmpty(db: Database): void {
       notes: "Consulta habitual por controles anuales.",
     });
     patient.run({
+      // fecha de nacimiento fijada al MM-DD de hoy → siempre cumple años en el demo
       id: "pat_gomez_2",
       full_name: "Mario Gómez",
       dni: "33.111.456",
-      date_of_birth: "1990-09-09",
+      date_of_birth: `1990-${DEMO_MMDD}`,
       phone: "+54 9 11 5555-4040",
       email: "mario.gomez@example.com",
       coverage: "OSDE 310",
@@ -132,29 +134,39 @@ export function seedIfEmpty(db: Database): void {
       price = 0,
     ) => appt.run({ id, patient, provider, start, reason, status, price });
 
-    // Upcoming (scheduled)
-    A("apt_1001", "pat_gomez", "prov_ruiz", "2026-09-11T09:30:00", "Control de presión arterial");
-    A("apt_1002", "pat_fernandez", "prov_sosa", "2026-09-10T10:00:00", "Control de anticoagulación");
-    A("apt_1003", "pat_ortiz", "prov_ruiz", "2026-09-10T09:30:00", "Chequeo anual");
-    A("apt_1004", "pat_gomez_2", "prov_ruiz", "2026-09-10T11:00:00", "Control de asma");
+    // Times are relative to "now" so the demo makes sense whenever it's run.
+    const S = demoNextSlot(15); // next :00/:30 slot, ~15 min out
+    const slotId = (provider: string, isoStart: string) =>
+      `slot_${provider}_${isoStart.slice(0, 10)}_${isoStart.slice(11, 13)}${isoStart.slice(14, 16)}`;
 
-    // Today (2026-09-09) — some already attended (revenue history)…
-    A("apt_0901", "pat_ortiz", "prov_ruiz", "2026-09-09T09:00:00", "Consulta clínica", "completed", 18000);
-    A("apt_0904", "pat_fernandez", "prov_sosa", "2026-09-09T10:00:00", "Consulta + ECG", "completed", 42000);
-    // …and Dra. Ruiz still has a live morning to run (for the agenda demo).
-    // Mario cumple años hoy; María y Jorge tienen login y pueden ver la demora.
-    A("apt_0910", "pat_gomez_2", "prov_ruiz", "2026-09-09T10:00:00", "Control de asma", "scheduled", 18000);
-    A("apt_0911", "pat_gomez", "prov_ruiz", "2026-09-09T10:30:00", "Control de presión arterial", "scheduled", 18000);
-    A("apt_0912", "pat_fernandez", "prov_ruiz", "2026-09-09T11:00:00", "Control clínico", "scheduled", 18000);
+    // Mañana (para "¿qué agenda tengo mañana?")
+    A("apt_1001", "pat_gomez", "prov_ruiz", `${DEMO_TOMORROW}T11:30:00`, "Control de presión arterial");
+    A("apt_1002", "pat_fernandez", "prov_sosa", `${DEMO_TOMORROW}T10:00:00`, "Control de anticoagulación");
+    A("apt_1003", "pat_ortiz", "prov_ruiz", `${DEMO_TOMORROW}T09:30:00`, "Chequeo anual");
+    A("apt_1004", "pat_gomez_2", "prov_ruiz", `${DEMO_TOMORROW}T10:30:00`, "Control de asma");
 
-    db.prepare(
-      `UPDATE slots SET taken = 1 WHERE id IN (
-        'slot_prov_ruiz_2026-09-11_0930','slot_prov_sosa_2026-09-10_1000',
-        'slot_prov_ruiz_2026-09-10_0930','slot_prov_ruiz_2026-09-10_1100',
-        'slot_prov_ruiz_2026-09-09_0900','slot_prov_sosa_2026-09-09_1000',
-        'slot_prov_ruiz_2026-09-09_1000','slot_prov_ruiz_2026-09-09_1030','slot_prov_ruiz_2026-09-09_1100'
-      )`,
-    ).run();
+    // Hoy, ya atendidos (historia de recaudación)
+    A("apt_0901", "pat_ortiz", "prov_ruiz", shiftIso(S, -60), "Consulta clínica", "completed", 18000);
+    A("apt_0904", "pat_fernandez", "prov_sosa", shiftIso(S, -30), "Consulta + ECG", "completed", 42000);
+    // Hoy, agenda en vivo de la Dra. Ruiz — próximo, +30, +60.
+    // Mario cumple años hoy; María y Jorge tienen login y ven la demora.
+    A("apt_0910", "pat_gomez_2", "prov_ruiz", S, "Control de asma", "scheduled", 18000);
+    A("apt_0911", "pat_gomez", "prov_ruiz", shiftIso(S, 30), "Control de presión arterial", "scheduled", 18000);
+    A("apt_0912", "pat_fernandez", "prov_ruiz", shiftIso(S, 60), "Control clínico", "scheduled", 18000);
+
+    const taken = [
+      slotId("prov_ruiz", `${DEMO_TOMORROW}T11:30:00`),
+      slotId("prov_sosa", `${DEMO_TOMORROW}T10:00:00`),
+      slotId("prov_ruiz", `${DEMO_TOMORROW}T09:30:00`),
+      slotId("prov_ruiz", `${DEMO_TOMORROW}T10:30:00`),
+      slotId("prov_ruiz", shiftIso(S, -60)),
+      slotId("prov_sosa", shiftIso(S, -30)),
+      slotId("prov_ruiz", S),
+      slotId("prov_ruiz", shiftIso(S, 30)),
+      slotId("prov_ruiz", shiftIso(S, 60)),
+    ];
+    const mark = db.prepare("UPDATE slots SET taken = 1 WHERE id = ?");
+    for (const id of taken) mark.run(id);
 
     const inv = db.prepare(
       "INSERT INTO invoices (id, patient_id, date, concept, amount, status) VALUES (?, ?, ?, ?, ?, ?)",

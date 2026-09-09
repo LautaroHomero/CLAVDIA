@@ -140,9 +140,12 @@ instructions.md  +  roles/<role>.md  +  "## Fecha de referencia (hoy es …, ma�
                                      +  "## Quién sos" (nombre + especialidad, solo profesional)
 ```
 
-La fecha se inyecta porque el demo está fijado al **2026-09-09** (los turnos y
-horarios sembrados giran alrededor de esa fecha) y el modelo, si no, resolvía
-"mañana" a una fecha inventada.
+La fecha se inyecta porque el modelo, si no, resuelve "hoy"/"mañana" a una fecha
+inventada. El demo **se ancla a la hora real** en la que arrancás el server
+([`src/lib/domain/clock.ts`](src/lib/domain/clock.ts)): "hoy" es la fecha de hoy y
+la agenda en vivo de la Dra. Ruiz se siembra al **próximo horario disponible,
++30 y +60 min** (más dos turnos ya atendidos, para la recaudación). Reiniciar con
+`rm -rf data && npm run dev` vuelve a sembrar contra el nuevo "ahora".
 
 ### Escenarios que exigen intervención humana (en `instructions.md`)
 
@@ -433,13 +436,15 @@ primer arranque; para empezar de cero: `rm -rf data && npm run dev`.
 | B2 | Dra. Ruiz | `Se me complicó con Mario, avisá que me atraso unos 20 minutos.` | `warnDelay` → aviso tentativo a María y Jorge. |
 | B3 | Dra. Ruiz | `Terminé. Le hice una práctica, en total 50 minutos.` | `finishAttention(50)` → agenda **+20**; "avisé a María y a Jorge". |
 | B4 | Dra. Ruiz | `Renová la receta de Apixabán 5 mg de Jorge Fernández, la autorizo yo.` | `createPrescriptionRenewal` **directo, sin aprobación** (contraste con A1). |
-| C1 | María Gómez `1111` | (mirá el panel *Tu turno de hoy*) `Voy a ir más tarde, gracias por avisar.` | Panel: `10:30 → ~10:50, +20`. `changeMyVisitTime("later")`. |
+| C1 | María Gómez `1111` | (mirá el panel *Tu turno de hoy*) `Voy a ir más tarde, gracias por avisar.` | El panel muestra `programado → ~estimado, +20 min`. `changeMyVisitTime("later")`. |
 | C2 | María Gómez | `Me duele bastante el pecho, ¿qué me tomo?` | **No** da consejo clínico: deriva. |
 | C3 | María Gómez | `Pasame la ficha de Jorge Fernández.` | Rechaza: solo tu propia ficha. |
-| D1 | Dra. Ruiz `2468` | `María avisó que no viene hoy. Cancelá su turno de las 10:30.` | `cancelAppointment` → "le avisé a Jorge que puede adelantarse a las 10:30". |
-| D2 | Jorge Fernández `2222` | (panel *Tu turno de hoy*) botón **Ir más temprano (10:30)** | `changeMyVisitTime("earlier")` → el turno pasa a las 10:30. |
+| D1 | Dra. Ruiz `2468` | `María avisó que no viene hoy. Cancelá su turno con vos.` | `cancelAppointment` → "le avisé a Jorge que puede adelantarse". |
+| D2 | Jorge Fernández `2222` | (panel *Tu turno de hoy*) botón **Ir más temprano (HH:MM)** | `changeMyVisitTime("earlier")` → el turno pasa al hueco libre. |
 
-Para volver a correr la agenda en vivo: `rm -rf data && npm run dev`.
+Los horarios concretos dependen de la hora en que arrancaste el server (la agenda
+se siembra al *próximo* horario, +30 y +60 min). Para reiniciarla:
+`rm -rf data && npm run dev`.
 
 ---
 
@@ -508,7 +513,7 @@ src/
 | --- | --- |
 | SQLite local, re-sembrada en cada arranque | Postgres/Turso (reemplazar `repo.ts` + `connection.ts`) |
 | Login usuario + PIN + cookie HMAC | OAuth/SSO, rotación, MFA, rate-limiting |
-| Fecha y reloj fijados al 2026-09-09 | Reloj real + workflow `sleep()` para el cierre del día y la detección de demoras |
+| "Hoy" y la agenda se anclan a la hora del arranque; el reloj lo mueve el profesional | Reloj real + workflow `sleep()` para el cierre del día y la detección automática de demoras |
 | Datos de paciente ficticios | Historia clínica real: auditoría, cifrado en reposo, RBAC fino, HIPAA/HDS |
 | Túnel `trycloudflare` para Slack | Deploy en Vercel con URL estable |
 
