@@ -6,6 +6,11 @@ import { useRouter } from "next/navigation";
 type Kind = "paciente" | "profesional";
 type PickUser = { id: string; name: string; role: "medico" | "recepcion" | "paciente" };
 
+const FIELD =
+  "w-full rounded-md border border-hairline bg-surface px-3.5 py-2.5 text-[16px] text-ink placeholder:text-muted/70 transition-colors focus:border-ink focus:outline-none";
+const PRIMARY_BTN =
+  "w-full rounded-md bg-ink px-4 py-2.5 text-[16px] font-semibold text-white transition-colors hover:bg-ink-hover disabled:opacity-40";
+
 export default function LoginPage() {
   const router = useRouter();
   const [kind, setKind] = useState<Kind | null>(null);
@@ -22,7 +27,7 @@ export default function LoginPage() {
   const hints =
     kind === "profesional"
       ? users.filter((u) => u.role !== "paciente").map((u) => u.name)
-      : users.filter((u) => u.role === "paciente").map((u) => u.name);
+      : [];
 
   function goHome() {
     router.replace("/");
@@ -30,51 +35,52 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center gap-6 p-6 text-neutral-900">
-      <div>
-        <h1 className="text-lg font-semibold">Secretario médico</h1>
-        <p className="text-xs text-neutral-500">Ingresá para hablar con el agente.</p>
-      </div>
+    <main className="mx-auto flex min-h-screen w-full max-w-[420px] flex-col justify-center gap-7 px-6 py-10">
+      <header className="space-y-1.5">
+        <h1 className="text-[18px] font-semibold tracking-tight text-ink">Secretario médico</h1>
+        <p className="text-[14px] text-muted">Ingresá para hablar con el agente.</p>
+      </header>
 
       {!kind ? (
-        <div className="space-y-2">
-          <button
+        <div className="space-y-3">
+          <ProfileButton
+            title="Soy paciente"
+            subtitle="Ver mis turnos, sacar turno, pedir mi receta"
             onClick={() => {
               setKind("paciente");
               setMode("login");
             }}
-            className="w-full rounded-lg border border-neutral-200 bg-white px-4 py-3 text-left text-sm hover:border-neutral-400"
-          >
-            <span className="font-medium">Soy paciente</span>
-            <span className="block text-xs text-neutral-500">Ver mis turnos, sacar turno, pedir mi receta</span>
-          </button>
-          <button
+          />
+          <ProfileButton
+            title="Soy profesional"
+            subtitle="Médico/a o recepción"
             onClick={() => {
               setKind("profesional");
               setMode("login");
             }}
-            className="w-full rounded-lg border border-neutral-200 bg-white px-4 py-3 text-left text-sm hover:border-neutral-400"
-          >
-            <span className="font-medium">Soy profesional</span>
-            <span className="block text-xs text-neutral-500">Médico/a o recepción</span>
-          </button>
+          />
         </div>
       ) : (
-        <div className="space-y-4">
-          <button onClick={() => setKind(null)} className="text-xs text-neutral-500 underline">
+        <div className="space-y-5">
+          <button
+            onClick={() => setKind(null)}
+            className="text-[13px] font-medium text-muted transition-colors hover:text-ink"
+          >
             ← cambiar
           </button>
 
-          {mode === "login" ? (
-            <LoginForm kind={kind} hints={hints} onDone={goHome} />
-          ) : (
-            <SignupForm onDone={goHome} />
-          )}
+          <div className="rounded-xl border border-hairline bg-surface p-5 shadow-card">
+            {mode === "login" ? (
+              <LoginForm kind={kind} hints={hints} onDone={goHome} />
+            ) : (
+              <SignupForm onDone={goHome} />
+            )}
+          </div>
 
           {kind === "paciente" && (
             <button
               onClick={() => setMode(mode === "login" ? "signup" : "login")}
-              className="text-xs text-neutral-600 underline"
+              className="text-[13px] font-medium text-muted underline decoration-hairline-strong underline-offset-4 transition-colors hover:text-ink"
             >
               {mode === "login" ? "¿Sos nuevo/a? Registrate" : "Ya tengo usuario, iniciar sesión"}
             </button>
@@ -82,6 +88,26 @@ export default function LoginPage() {
         </div>
       )}
     </main>
+  );
+}
+
+function ProfileButton({
+  title,
+  subtitle,
+  onClick,
+}: {
+  title: string;
+  subtitle: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="group w-full rounded-xl border border-hairline bg-surface px-5 py-4 text-left shadow-card transition-all hover:border-ink"
+    >
+      <span className="block text-[16px] font-semibold text-ink">{title}</span>
+      <span className="mt-0.5 block text-[13px] text-muted">{subtitle}</span>
+    </button>
   );
 }
 
@@ -122,45 +148,47 @@ function LoginForm({
   }
 
   return (
-    <div className="space-y-3">
-      <label className="block text-xs font-medium text-neutral-500">Nombre</label>
-      <input
-        autoFocus
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="Tu nombre y apellido"
-        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm outline-none focus:border-neutral-500"
-      />
-      {hints.length > 0 && (
-        <div className="flex flex-wrap gap-1">
-          {hints.map((h) => (
-            <button
-              key={h}
-              onClick={() => setName(h)}
-              className="rounded-full border border-neutral-200 px-2 py-0.5 text-[11px] text-neutral-500 hover:bg-neutral-100"
-            >
-              {h}
-            </button>
-          ))}
-        </div>
-      )}
-      <label className="block text-xs font-medium text-neutral-500">PIN</label>
-      <input
-        value={pin}
-        onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-        inputMode="numeric"
-        placeholder="4 dígitos"
-        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-center text-lg tracking-[0.4em] outline-none focus:border-neutral-500"
-      />
-      <button
-        onClick={submit}
-        disabled={busy || !name.trim() || pin.length < 4}
-        className="w-full rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
-      >
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <label className="block text-[13px] font-semibold text-ink">Nombre</label>
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Tu nombre y apellido"
+          className={FIELD}
+        />
+        {hints.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 pt-0.5">
+            {hints.map((h) => (
+              <button
+                key={h}
+                onClick={() => setName(h)}
+                className="rounded-full border border-hairline px-2.5 py-1 text-[12px] text-muted transition-colors hover:border-ink hover:text-ink"
+              >
+                {h}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <label className="block text-[13px] font-semibold text-ink">PIN</label>
+        <input
+          value={pin}
+          onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          inputMode="numeric"
+          placeholder="4 dígitos"
+          className={`${FIELD} text-center text-[20px] tracking-[0.4em]`}
+        />
+      </div>
+
+      <button onClick={submit} disabled={busy || !name.trim() || pin.length < 4} className={PRIMARY_BTN}>
         Entrar
       </button>
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      {error && <p className="text-[13px] text-[#c0392b]">{error}</p>}
     </div>
   );
 }
@@ -201,30 +229,37 @@ function SignupForm({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div className="space-y-2">
-      <p className="text-xs text-neutral-500">Alta de paciente. Después podés completar el resto con el agente.</p>
-      <input value={f.fullName} onChange={set("fullName")} placeholder="Nombre y apellido"
-        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm" />
-      <input value={f.dni} onChange={set("dni")} placeholder="DNI"
-        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm" />
-      <input value={f.dateOfBirth} onChange={set("dateOfBirth")} placeholder="Fecha de nacimiento (AAAA-MM-DD)"
-        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm" />
-      <input value={f.coverage} onChange={set("coverage")} placeholder="Cobertura (obra social / prepaga)"
-        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm" />
-      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono (opcional)"
-        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm" />
-      <input value={f.email} onChange={set("email")} placeholder="Email (opcional)"
-        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm" />
-      <input value={f.pin} onChange={set("pin")} inputMode="numeric" placeholder="Elegí un PIN de 4 dígitos"
-        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-center tracking-[0.4em]" />
-      <button
-        onClick={submit}
-        disabled={busy}
-        className="w-full rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
-      >
+    <div className="space-y-3">
+      <p className="text-[13px] text-muted">
+        Alta de paciente. Después podés completar el resto con el agente.
+      </p>
+      <input value={f.fullName} onChange={set("fullName")} placeholder="Nombre y apellido" className={FIELD} />
+      <input value={f.dni} onChange={set("dni")} placeholder="DNI" className={FIELD} />
+      <input
+        value={f.dateOfBirth}
+        onChange={set("dateOfBirth")}
+        placeholder="Fecha de nacimiento (AAAA-MM-DD)"
+        className={FIELD}
+      />
+      <input
+        value={f.coverage}
+        onChange={set("coverage")}
+        placeholder="Cobertura (obra social / prepaga)"
+        className={FIELD}
+      />
+      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono (opcional)" className={FIELD} />
+      <input value={f.email} onChange={set("email")} placeholder="Email (opcional)" className={FIELD} />
+      <input
+        value={f.pin}
+        onChange={set("pin")}
+        inputMode="numeric"
+        placeholder="Elegí un PIN de 4 dígitos"
+        className={`${FIELD} text-center tracking-[0.4em]`}
+      />
+      <button onClick={submit} disabled={busy} className={PRIMARY_BTN}>
         Crear cuenta y entrar
       </button>
-      {error && <p className="text-xs text-red-600">{error}</p>}
+      {error && <p className="text-[13px] text-[#c0392b]">{error}</p>}
     </div>
   );
 }
