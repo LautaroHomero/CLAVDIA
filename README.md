@@ -121,6 +121,7 @@ Paciente/Recepción/Médico ─► /api/chat  ─► start(secretaryWorkflow, [m
 | Cierre del día | `closeDay` | **Solo recepción.** Calcula y guarda el resumen del consultorio y el de cada profesional, y lo publica en Slack. En producción lo dispararía un workflow durable al terminar el último turno. |
 | Agenda en vivo (profesional) | `getNextPatient` · `startAttention` · `finishAttention` | Antes de cada paciente el chat/panel le da el **resumen del día** (incluye si **cumple años**). Cuando dice "ok" → `startAttention` (hora real de inicio). Al terminar → `finishAttention` con `actualMinutes` si duró distinto por una práctica. |
 | Demora en el chat del paciente | `getMyVisitStatus` · `changeMyVisitTime` | Al iniciar/terminar cada atención, los pacientes que siguen reciben un **aviso** con su horario estimado nuevo. Pueden **ir más tarde** (solo confirma) o **más temprano** (adelanta el turno si hay hueco). Panel "Tu turno de hoy". |
+| Turno cancelado libera lugar | `cancelAppointment` / `rescheduleAppointment` | Al cancelar un turno de hoy, el slot vuelve a estar libre y el sistema **avisa a los que esperan** que quedó un lugar más temprano; con "Ir más temprano" se adelantan. |
 | Renovación de receta | `requestHumanApproval` → `createPrescriptionRenewal` | Recepción/paciente la escalan; el/la médico/a la hace directo. |
 | Reembolso ≥ $50.000 o motivo poco claro | `requestHumanApproval` → `refundInvoice` | |
 | Cancelar/reprogramar < 24 h o estudio caro | `requestHumanApproval` → `cancelAppointment` | |

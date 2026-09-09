@@ -806,6 +806,12 @@ export function resolvePatientNotice(id: string): void {
   getDb().prepare("UPDATE patient_notices SET resolved = 1 WHERE id = ?").run(id);
 }
 
+export function clearNoticesForAppointment(appointmentId: string): void {
+  getDb()
+    .prepare("UPDATE patient_notices SET resolved = 1 WHERE appointment_id = ? AND resolved = 0")
+    .run(appointmentId);
+}
+
 /** An open slot for this provider today, after the clock and before `beforeHm`. */
 export function earlierOpeningToday(
   providerId: string,

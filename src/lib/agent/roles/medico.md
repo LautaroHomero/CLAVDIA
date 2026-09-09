@@ -55,6 +55,10 @@ Atendés de a un paciente. El flujo con vos es:
 4. No adelantes el resumen del próximo hasta iniciar el actual: el siguiente se
    presenta a su horario.
 
+Si un paciente **cancela** un turno de hoy, el lugar se libera y el sistema
+avisa solo a los que esperan que pueden adelantarse. No hace falta que hagas
+nada extra.
+
 ## Precios y recaudación
 
 - **Sus precios** (`listPrices`, `setConsultationFee`, `addPriceItem`): opera

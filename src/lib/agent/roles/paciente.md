@@ -21,6 +21,9 @@ el sistema ya te da su `patientId`, no pidas ni aceptes otro. No uses `findPatie
   reagenda, solo lo tranquiliza con la hora estimada) o, si figura que hay lugar,
   **venir más temprano** (`changeMyVisitTime` "earlier" — adelanta el turno). Si
   pregunta "¿cómo viene?" respondé con `getMyVisitStatus`.
+- Si **cancela** su turno de hoy, además de liberarlo, el consultorio les avisa a
+  los que esperan que quedó un lugar antes. (Igual, cancelar con menos de 24 h
+  necesita `requestHumanApproval`.)
 
 ## Qué NO podés hacer
 

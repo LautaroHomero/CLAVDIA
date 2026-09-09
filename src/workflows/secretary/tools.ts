@@ -4,6 +4,7 @@ import {
   bookSlot,
   buildDayReport,
   cancelAppointmentById,
+  clearNoticesForAppointment,
   createPatient,
   createPrescriptionRequest,
   createProfessional,
@@ -313,7 +314,11 @@ async function cancelAppointmentStep(
   if (existing.status !== "scheduled")
     return { ok: false, error: `El turno ${appointmentId} está ${existing.status}.` };
   const apt = cancelAppointmentById(appointmentId);
-  return { ok: true, appointmentId: apt.id, status: apt.status };
+  clearNoticesForAppointment(appointmentId);
+  // Frees the slot → tell the patients still waiting today that there's an opening.
+  const avisos =
+    existing.start.startsWith(DEMO_TODAY) ? refreshWaitingNotices(existing.providerId) : [];
+  return { ok: true, appointmentId: apt.id, status: apt.status, avisosEnviados: avisos };
 }
 
 async function rescheduleAppointmentStep(
@@ -334,13 +339,19 @@ async function rescheduleAppointmentStep(
   if (!slot || slot.taken)
     return { ok: false, error: `El nuevo horario ${newSlotId} no está disponible.` };
   cancelAppointmentById(appointmentId);
+  clearNoticesForAppointment(appointmentId);
   const apt = bookSlot({ patientId: existing.patientId, slotId: newSlotId, reason: existing.reason });
   setAppointmentPrice(apt.id, existing.price || priceForReason(apt.providerId, existing.reason));
+  const avisos =
+    existing.start.startsWith(DEMO_TODAY) || apt.start.startsWith(DEMO_TODAY)
+      ? refreshWaitingNotices(existing.providerId)
+      : [];
   return {
     ok: true,
     previousAppointmentId: appointmentId,
     appointmentId: apt.id,
     start: apt.start.replace("T", " "),
+    avisosEnviados: avisos,
   };
 }
 
@@ -529,26 +540,35 @@ async function closeDayStep({ date }: { date?: string }, ctx: ToolCtx) {
 // Live agenda (running late / ahead, pre-visit briefing, patient notices)
 // ---------------------------------------------------------------------------
 
-/** After a visit starts/ends, refresh the delay notice for every waiting patient. */
+const toMin = (hm: string) => Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3, 5));
+
+/**
+ * Refresh the notice for every waiting patient after the agenda changes
+ * (a visit started/ended, or a turn was freed by a cancellation).
+ */
 function refreshWaitingNotices(providerId: string): { patient: string; message: string }[] {
   const agenda = providerAgenda(providerId, DEMO_TODAY);
   const out: { patient: string; message: string }[] = [];
   for (const e of [...(agenda.next ? [agenda.next] : []), ...agenda.upcoming]) {
+    const earlier = earlierOpeningToday(providerId, DEMO_TODAY, e.estimated);
     let msg: string | null = null;
+
     if (e.delayMinutes >= 10) {
-      const earlier = earlierOpeningToday(providerId, DEMO_TODAY, e.estimated);
       msg =
         `Se demoró un turno anterior. Tu cita de las ${e.scheduled} se estima ahora ~${e.estimated} ` +
         `(la agenda va +${e.delayMinutes} min). Si te queda mejor, podés venir más tarde` +
         (earlier ? `, o adelantarte: hay lugar ${earlier.time}.` : ".");
-    } else if (agenda.running === "adelantada") {
-      const earlier = earlierOpeningToday(providerId, DEMO_TODAY, e.scheduled);
-      if (earlier)
-        msg = `El profesional va adelantado. Si podés venir antes de las ${e.scheduled}, hay lugar ${earlier.time}.`;
+    } else if (earlier && toMin(e.scheduled) - toMin(earlier.time) >= 15) {
+      msg =
+        `Se liberó un turno más temprano con ${agenda.providerName}: hay lugar ${earlier.time} ` +
+        `(el tuyo es ${e.scheduled}). Si te sirve, podés adelantarte.`;
     }
+
     if (msg) {
       replacePatientNotice(e.appointmentId, e.patientId, DEMO_TODAY, msg);
       out.push({ patient: e.patientName, message: msg });
+    } else {
+      clearNoticesForAppointment(e.appointmentId);
     }
   }
   return out;
