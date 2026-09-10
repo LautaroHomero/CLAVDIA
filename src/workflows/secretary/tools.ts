@@ -200,8 +200,8 @@ async function registerPatientStep(
     dni: string;
     dateOfBirth: string;
     coverage: string;
-    phone?: string;
-    email?: string;
+    phone: string;
+    email: string;
     reason?: string;
   },
   ctx: ToolCtx,
@@ -210,6 +210,14 @@ async function registerPatientStep(
   const orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización activa." };
   const orgName = actorOf(ctx)?.activeOrg?.name ?? "este consultorio";
+
+  const mail = (email ?? "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
+    return { ok: false, error: "Pedí un email válido: es lo que usa el paciente para activar su portal." };
+  }
+  if ((phone ?? "").replace(/\D/g, "").length < 8) {
+    return { ok: false, error: "Pedí un teléfono válido para el paciente." };
+  }
 
   const existing = getPatientByDni(dni);
   if (existing) {
@@ -221,14 +229,14 @@ async function registerPatientStep(
       message: `${existing.fullName} (DNI ${dni}) ya tenía ficha; lo/la sumé a ${orgName}.`,
     };
   }
-  const patient = createPatient({ fullName, dni, dateOfBirth, coverage, phone, email, notes: reason });
+  const patient = createPatient({ fullName, dni, dateOfBirth, coverage, phone, email: mail, notes: reason });
   joinPatientOrg(patient.id, orgId);
   return {
     ok: true,
     patientId: patient.id,
     fullName: patient.fullName,
     dni: patient.dni,
-    message: `Paciente dado de alta en ${orgName}. Para acceso al portal, se registra desde la pantalla de ingreso.`,
+    message: `Paciente dado de alta en ${orgName}. Para entrar al portal, activa su acceso desde la pantalla de ingreso con su DNI, email y teléfono.`,
   };
 }
 
@@ -942,14 +950,14 @@ export const secretaryTools = {
 
   registerPatient: {
     description:
-      "Da de alta un paciente en ESTE consultorio (médico/a o recepción). Pedí antes: nombre y apellido, DNI, fecha de nacimiento (AAAA-MM-DD) y cobertura. Si ya existe alguien con ese DNI, no dupliques: se lo suma a este consultorio.",
+      "Da de alta un paciente en ESTE consultorio (médico/a o recepción). Pedí antes TODOS estos datos, son obligatorios: nombre y apellido, DNI, fecha de nacimiento (AAAA-MM-DD), cobertura, email y teléfono. El email y el teléfono son los que después le permiten al paciente activar su acceso al portal y recuperar el PIN, así que no los omitas. Si ya existe alguien con ese DNI, no dupliques: se lo suma a este consultorio.",
     inputSchema: z.object({
       fullName: z.string(),
       dni: z.string(),
       dateOfBirth: z.string().describe("AAAA-MM-DD"),
       coverage: z.string().describe("Obra social o prepaga"),
-      phone: z.string().optional(),
-      email: z.string().optional(),
+      phone: z.string().describe("Teléfono de contacto (obligatorio)"),
+      email: z.string().describe("Email de contacto (obligatorio, sirve para activar el portal)"),
       reason: z.string().optional(),
     }),
     execute: registerPatientStep,

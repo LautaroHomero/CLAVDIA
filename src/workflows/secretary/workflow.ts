@@ -1,7 +1,12 @@
 import { getWritable } from "workflow";
 import { DurableAgent } from "@workflow/ai/agent";
 import { anthropic } from "@workflow/ai/anthropic";
-import { convertToModelMessages, type UIMessage, type UIMessageChunk } from "ai";
+import {
+  convertToModelMessages,
+  type ModelMessage,
+  type UIMessage,
+  type UIMessageChunk,
+} from "ai";
 import { loadAgentInstructions } from "@/lib/agent/instructions";
 import {
   DEMO_TODAY,
@@ -22,6 +27,43 @@ esta fecha, y pasá siempre las fechas a las herramientas en formato AAAA-MM-DD.
 No calcules el día de la semana por tu cuenta ni uses otra fecha como "actual".`;
 
 const MODEL = process.env.AGENT_MODEL ?? "claude-haiku-4-5-20251001";
+
+/**
+ * Cost controls for the agent loop.
+ *
+ * `MAX_STEPS` bounds the tool-calling loop: without it a misbehaving tool that
+ * keeps erroring can chain LLM calls indefinitely. `MAX_OUTPUT_TOKENS` is a
+ * backstop, not a tuning knob — chat replies here are a paragraph at most.
+ */
+const MAX_STEPS = 10;
+const MAX_OUTPUT_TOKENS = 2048;
+
+/**
+ * Prompt caching. The system prompt (base + role doc + date + identity) is
+ * byte-stable for the whole conversation, and the tool schemas never change, so
+ * they form a perfect cache prefix. `ttl: "1h"` (vs the 5-minute default)
+ * because the workflow can suspend on a human-approval hook for a long time
+ * between steps; the 2x write cost is repaid by the first miss it prevents.
+ *
+ * The conversation tail gets a separate 5-minute breakpoint so the multiple
+ * LLM calls within a single turn (one per tool round-trip) re-read the history
+ * from cache instead of re-billing it in full each step.
+ */
+const CACHE_PREFIX = {
+  anthropic: { cacheControl: { type: "ephemeral", ttl: "1h" } },
+} as const;
+const CACHE_TAIL = {
+  anthropic: { cacheControl: { type: "ephemeral" } },
+} as const;
+
+/** Mark the last message so everything up to it is served from cache on later steps. */
+function withCachedTail(messages: ModelMessage[]): ModelMessage[] {
+  const tail = messages.at(-1);
+  if (tail) {
+    tail.providerOptions = { ...tail.providerOptions, ...CACHE_TAIL };
+  }
+  return messages;
+}
 
 /**
  * The durable medical-secretary agent.
@@ -55,7 +97,13 @@ export async function secretaryWorkflow(messages: UIMessage[], actor: Actor) {
 
   const agent = new DurableAgent({
     model: anthropic(MODEL),
-    instructions: instructions + DATE_CONTEXT + identity,
+    // A `SystemModelMessage` (not a bare string) so the whole prompt + the tool
+    // schemas render as one cached prefix — re-read at 0.1x on every later step.
+    instructions: {
+      role: "system",
+      content: instructions + DATE_CONTEXT + identity,
+      providerOptions: CACHE_PREFIX,
+    },
     tools: secretaryTools,
   });
 
@@ -65,11 +113,31 @@ export async function secretaryWorkflow(messages: UIMessage[], actor: Actor) {
       ? [...TOOLS_BY_ROLE.medico, "registerProfessional" as const]
       : TOOLS_BY_ROLE[actor.role];
 
+  const orgId = actor.activeOrg?.id ?? actor.orgs[0]?.id ?? "-";
+
   await agent.stream({
-    messages: await convertToModelMessages(messages),
+    messages: withCachedTail(await convertToModelMessages(messages)),
     writable,
     activeTools,
+    maxSteps: MAX_STEPS,
+    maxOutputTokens: MAX_OUTPUT_TOKENS,
     experimental_context: actor,
+    // Per-step token accounting — verifies caching is working and feeds
+    // per-organization usage metering. Counts only; no message content is logged.
+    onStepFinish: ({ usage, providerMetadata }) => {
+      const a = providerMetadata?.anthropic as
+        | { cacheCreationInputTokens?: number; cacheReadInputTokens?: number }
+        | undefined;
+      console.info("[secretary] llm-step", {
+        org: orgId,
+        role: actor.role,
+        model: MODEL,
+        input: usage.inputTokens ?? 0,
+        output: usage.outputTokens ?? 0,
+        cacheRead: a?.cacheReadInputTokens ?? usage.cachedInputTokens ?? 0,
+        cacheWrite: a?.cacheCreationInputTokens ?? 0,
+      });
+    },
     onError: ({ error }) => {
       console.error("[secretaryWorkflow] agent stream error:", error);
     },

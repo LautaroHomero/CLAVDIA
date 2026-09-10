@@ -234,6 +234,17 @@ export function joinPatientOrg(patientId: string, organizationId: string): void 
 
 export const normEmail = (s: string): string => s.trim().toLowerCase();
 
+/** Digits only, trailing 8 — tolerant of +54 / 0 / 15 / area-code variations. */
+export const normPhone = (s: string): string => s.replace(/\D/g, "").slice(-8);
+
+/** The portal login bound to a patient record, if one has been claimed. */
+export function getUserByPatientId(patientId: string): User | undefined {
+  const r = getDb()
+    .prepare("SELECT * FROM users WHERE patient_id = ?")
+    .get(patientId) as Row | undefined;
+  return r ? toUser(r) : undefined;
+}
+
 export function getUserByName(name: string): (User & { pinHash: string; pinSalt: string }) | undefined {
   const target = normName(name);
   const r = (getDb().prepare("SELECT * FROM users").all() as Row[]).find(

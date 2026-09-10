@@ -74,6 +74,18 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   if (typeof patch.fullName === "string" && !patch.fullName.trim()) {
     return Response.json({ ok: false, error: "El nombre no puede quedar vacío." }, { status: 400 });
   }
+  if (typeof patch.email === "string" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patch.email.trim())) {
+    return Response.json(
+      { ok: false, error: "El email no puede quedar vacío ni inválido: es lo que valida el acceso del paciente." },
+      { status: 400 },
+    );
+  }
+  if (typeof patch.phone === "string" && patch.phone.replace(/\D/g, "").length < 8) {
+    return Response.json(
+      { ok: false, error: "El teléfono no puede quedar vacío: es lo que valida el acceso del paciente." },
+      { status: 400 },
+    );
+  }
   if (typeof patch.dni === "string") {
     if (!patch.dni.trim()) {
       return Response.json({ ok: false, error: "El DNI no puede quedar vacío." }, { status: 400 });

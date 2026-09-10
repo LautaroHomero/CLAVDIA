@@ -195,15 +195,25 @@ function NewPatientForm({
         className={FIELD}
       />
       <input value={f.coverage} onChange={set("coverage")} placeholder="Cobertura (obra social / prepaga)" className={FIELD} />
-      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono (opcional)" className={FIELD} />
-      <input value={f.email} onChange={set("email")} placeholder="Email (opcional)" className={FIELD} />
+      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono" className={FIELD} />
+      <input value={f.email} onChange={set("email")} placeholder="Email" className={FIELD} />
       <p className="text-[11px] text-muted">
-        Si el DNI ya existe (incluye pacientes que se registraron solos), no se duplica: se suma a este consultorio.
+        El email y el teléfono son obligatorios: con ellos el paciente activa su acceso al portal y recupera el
+        PIN. Si el DNI ya existe (incluye pacientes que se registraron solos), no se duplica: se suma a este
+        consultorio.
       </p>
       <div className="flex gap-2">
         <button
           className={BTN_DARK}
-          disabled={busy || !f.fullName.trim() || !f.dni.trim() || !f.dateOfBirth.trim() || !f.coverage.trim()}
+          disabled={
+            busy ||
+            !f.fullName.trim() ||
+            !f.dni.trim() ||
+            !f.dateOfBirth.trim() ||
+            !f.coverage.trim() ||
+            !f.phone.trim() ||
+            !f.email.trim()
+          }
           onClick={submit}
         >
           Dar de alta

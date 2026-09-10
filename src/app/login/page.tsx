@@ -216,15 +216,16 @@ function PacienteSignup({ orgs, onDone }: { orgs: OrgOpt[]; onDone: () => void }
   return (
     <div className="space-y-2.5">
       <p className="text-[13px] text-muted">
-        Alta de paciente. El <strong>email</strong> te va a servir para entrar. Elegí un consultorio
-        (después podés sumarte a más).
+        Alta de paciente. El <strong>email</strong> te sirve para entrar y, junto con el{" "}
+        <strong>teléfono</strong>, para recuperar el PIN. Si el consultorio ya te cargó, tienen que
+        coincidir con los de tu ficha. Elegí un consultorio (después podés sumarte a más).
       </p>
       <input value={f.fullName} onChange={set("fullName")} placeholder="Nombre y apellido" className={FIELD} />
       <input value={f.dni} onChange={set("dni")} placeholder="DNI" className={FIELD} />
       <input value={f.dateOfBirth} onChange={set("dateOfBirth")} placeholder="Fecha de nacimiento (AAAA-MM-DD)" className={FIELD} />
       <input value={f.coverage} onChange={set("coverage")} placeholder="Cobertura (obra social / prepaga)" className={FIELD} />
       <input type="email" value={f.email} onChange={set("email")} placeholder="Email (para ingresar)" className={FIELD} />
-      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono (opcional)" className={FIELD} />
+      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono" className={FIELD} />
       <select value={f.organizationId} onChange={set("organizationId")} className={FIELD}>
         {orgs.map((o) => (
           <option key={o.id} value={o.id}>
@@ -239,7 +240,20 @@ function PacienteSignup({ orgs, onDone }: { orgs: OrgOpt[]; onDone: () => void }
         placeholder="Elegí un PIN de 4 dígitos"
         className={`${FIELD} text-center tracking-[0.4em]`}
       />
-      <button onClick={submit} disabled={busy} className={PRIMARY}>
+      <button
+        onClick={submit}
+        disabled={
+          busy ||
+          !f.fullName.trim() ||
+          !f.dni.trim() ||
+          !f.dateOfBirth.trim() ||
+          !f.coverage.trim() ||
+          !f.email.trim() ||
+          !f.phone.trim() ||
+          f.pin.replace(/\D/g, "").length !== 4
+        }
+        className={PRIMARY}
+      >
         Crear cuenta y entrar
       </button>
       <Err msg={error} />

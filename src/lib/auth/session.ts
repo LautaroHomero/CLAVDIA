@@ -13,8 +13,26 @@ export interface SessionClaims {
   activeOrgId?: string;
 }
 
+const DEV_FALLBACK_SECRET = "dev-only-insecure-secret-change-me";
+const IS_PROD = process.env.NODE_ENV === "production";
+
+/**
+ * HMAC key for the session cookie. In production it MUST be an explicit random
+ * string of at least 32 chars: an unset (or too-short, or left-at-the-default)
+ * secret lets anyone forge a session cookie and impersonate any role/org, so we
+ * fail hard at boot instead of silently running on a known key.
+ */
 function secret(): string {
-  return process.env.AUTH_SECRET || "dev-only-insecure-secret-change-me";
+  const s = process.env.AUTH_SECRET;
+  const usable = !!s && s.length >= 32 && s !== DEV_FALLBACK_SECRET;
+  if (usable) return s;
+  if (IS_PROD) {
+    throw new Error(
+      "AUTH_SECRET is required in production: set it to a random string of at least 32 characters " +
+        "(e.g. `openssl rand -base64 48`).",
+    );
+  }
+  return s || DEV_FALLBACK_SECRET;
 }
 const b64url = (input: Buffer | string) => Buffer.from(input).toString("base64url");
 
@@ -56,10 +74,13 @@ export function claimsFromRequest(req: Request): SessionClaims | null {
   return verifySession(match?.[1] ? decodeURIComponent(match[1]) : null);
 }
 
+/** `Secure` only in production so local dev over plain http still works. */
+const SECURE = IS_PROD ? "; Secure" : "";
+
 export function sessionSetCookie(token: string): string {
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${MAX_AGE_SECONDS}`;
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax${SECURE}; Max-Age=${MAX_AGE_SECONDS}`;
 }
 
 export function sessionClearCookie(): string {
-  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax${SECURE}; Max-Age=0`;
 }
