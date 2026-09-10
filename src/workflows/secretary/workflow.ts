@@ -59,10 +59,16 @@ export async function secretaryWorkflow(messages: UIMessage[], actor: Actor) {
     tools: secretaryTools,
   });
 
+  // A founding professional keeps admin rights, so they can also onboard staff.
+  const activeTools =
+    actor.role === "medico" && actor.activeOrg?.canAdmin
+      ? [...TOOLS_BY_ROLE.medico, "registerProfessional" as const]
+      : TOOLS_BY_ROLE[actor.role];
+
   await agent.stream({
     messages: await convertToModelMessages(messages),
     writable,
-    activeTools: TOOLS_BY_ROLE[actor.role],
+    activeTools,
     experimental_context: actor,
     onError: ({ error }) => {
       console.error("[secretaryWorkflow] agent stream error:", error);

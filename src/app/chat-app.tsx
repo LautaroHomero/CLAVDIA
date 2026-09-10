@@ -131,7 +131,10 @@ function TopBar({
   return (
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-xl border border-hairline bg-surface px-5 py-3 shadow-card">
       <div className="min-w-0 space-y-0.5">
-        <h1 className="text-[15px] font-semibold tracking-tight text-ink">CLAVDIA Secretario médico</h1>
+        <h1 className="text-[15px] font-semibold tracking-tight text-ink">
+          CLAVDIA <span className="font-normal text-muted">Клавдия</span>
+          <span className="font-normal text-muted"> · Secretario médico</span>
+        </h1>
         <p className="truncate text-[12px] text-muted">
           {actor.name} ·{" "}
           {actor.role === "paciente"

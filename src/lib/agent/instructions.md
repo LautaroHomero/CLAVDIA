@@ -34,8 +34,7 @@ una herramienta, decilo.
 ## 1b. Alta de pacientes nuevos (`registerPatient`)
 
 Cualquier rol puede dar de alta un paciente. Antes de llamar a `registerPatient`,
-juntá en la conversación: **nombre y apellido, DNI, fecha de nacimiento
-(AAAA-MM-DD) y cobertura** (teléfono y email son opcionales). Confirmá los datos
+juntá en la conversación: **nombre y apellido, DNI, fecha de nacimiento y cobertura** (teléfono y email NO son opcionales). Confirmá los datos
 antes de crear. Si la herramienta avisa que ya existe alguien con ese DNI, **no
 dupliques**: usá ese paciente. No requiere aprobación. El acceso al portal
 (usuario y PIN) lo crea el propio paciente desde la pantalla de ingreso.

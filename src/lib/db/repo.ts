@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type {
   Appointment,
+  AppointmentChangeRequest,
+  ChangeRequestKind,
+  ChangeRequestStatus,
   Invoice,
   LabResult,
   Medication,
@@ -11,6 +14,7 @@ import type {
   PrescriptionRequest,
   PriceItem,
   Provider,
+  ProviderSettings,
   Role,
   Slot,
   StaffRole,
@@ -109,6 +113,7 @@ const toOrg = (r: Row): Organization => ({
   name: r.name as string,
   slug: r.slug as string,
   address: r.address as string,
+  city: (r.city as string) ?? "",
   hours: r.hours as string,
   phone: r.phone as string,
 });
@@ -133,6 +138,7 @@ function slugify(s: string): string {
 export function createOrganization(input: {
   name: string;
   address?: string;
+  city?: string;
   phone?: string;
   hours?: string;
 }): Organization {
@@ -141,12 +147,13 @@ export function createOrganization(input: {
   if (db.prepare("SELECT 1 FROM organizations WHERE slug = ?").get(slug)) slug = `${slug}-${uid("").slice(1, 5)}`;
   const id = uid("org");
   db.prepare(
-    "INSERT INTO organizations (id, name, slug, address, hours, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO organizations (id, name, slug, address, city, hours, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(
     id,
     input.name.trim(),
     slug,
     input.address?.trim() ?? "",
+    input.city?.trim() ?? "",
     input.hours?.trim() || "Lunes a viernes de 8 a 18 h",
     input.phone?.trim() ?? "",
     new Date().toISOString(),
@@ -168,6 +175,7 @@ export function organizationNameTaken(name: string): boolean {
 const toUser = (r: Row): User => ({
   id: r.id as string,
   name: r.name as string,
+  email: (r.email as string) ?? "",
   role: r.role as Role,
   patientId: (r.patient_id as string) ?? undefined,
 });
@@ -178,13 +186,14 @@ export interface Membership {
   role: StaffRole;
   providerId?: string;
   specialty?: string;
+  canAdmin: boolean;
 }
 
 export function membershipsForUser(userId: string): Membership[] {
   return (
     getDb()
       .prepare(
-        `SELECT m.organization_id, o.name AS org_name, m.role, m.provider_id, p.specialty
+        `SELECT m.organization_id, o.name AS org_name, m.role, m.provider_id, m.can_admin, p.specialty
          FROM memberships m
          JOIN organizations o ON o.id = m.organization_id
          LEFT JOIN providers p ON p.id = m.provider_id
@@ -198,6 +207,8 @@ export function membershipsForUser(userId: string): Membership[] {
     role: r.role as StaffRole,
     providerId: (r.provider_id as string) ?? undefined,
     specialty: (r.specialty as string) ?? undefined,
+    // secretaría always administers; a médico only if flagged (org founder).
+    canAdmin: Boolean(r.can_admin) || (r.role as StaffRole) === "recepcion",
   }));
 }
 
@@ -221,10 +232,23 @@ export function joinPatientOrg(patientId: string, organizationId: string): void 
     .run(patientId, organizationId, new Date().toISOString());
 }
 
+export const normEmail = (s: string): string => s.trim().toLowerCase();
+
 export function getUserByName(name: string): (User & { pinHash: string; pinSalt: string }) | undefined {
   const target = normName(name);
   const r = (getDb().prepare("SELECT * FROM users").all() as Row[]).find(
     (row) => normName(row.name as string) === target,
+  );
+  if (!r) return undefined;
+  return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
+}
+
+/** Primary login lookup — email is the identifier for every role. */
+export function getUserByEmail(email: string): (User & { pinHash: string; pinSalt: string }) | undefined {
+  const target = normEmail(email);
+  if (!target) return undefined;
+  const r = (getDb().prepare("SELECT * FROM users").all() as Row[]).find(
+    (row) => normEmail((row.email as string) ?? "") === target,
   );
   if (!r) return undefined;
   return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
@@ -242,18 +266,29 @@ export function userNameTaken(name: string): boolean {
   );
 }
 
+export function userEmailTaken(email: string): boolean {
+  const t = normEmail(email);
+  return (getDb().prepare("SELECT email FROM users").all() as Row[]).some(
+    (r) => normEmail((r.email as string) ?? "") === t,
+  );
+}
+
 export function createUser(args: {
   name: string;
+  email: string;
   role: Role;
   pinHash: string;
   pinSalt: string;
   patientId?: string;
 }): User {
   const id = uid("u");
+  const email = normEmail(args.email);
   getDb()
-    .prepare("INSERT INTO users (id, name, role, pin_hash, pin_salt, patient_id) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(id, args.name.trim(), args.role, args.pinHash, args.pinSalt, args.patientId ?? null);
-  return { id, name: args.name.trim(), role: args.role, patientId: args.patientId };
+    .prepare(
+      "INSERT INTO users (id, name, email, role, pin_hash, pin_salt, patient_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run(id, args.name.trim(), email, args.role, args.pinHash, args.pinSalt, args.patientId ?? null);
+  return { id, name: args.name.trim(), email, role: args.role, patientId: args.patientId };
 }
 
 export function addMembership(args: {
@@ -261,12 +296,13 @@ export function addMembership(args: {
   organizationId: string;
   role: StaffRole;
   providerId?: string;
+  canAdmin?: boolean;
 }): void {
   getDb()
     .prepare(
-      "INSERT OR REPLACE INTO memberships (user_id, organization_id, role, provider_id) VALUES (?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO memberships (user_id, organization_id, role, provider_id, can_admin) VALUES (?, ?, ?, ?, ?)",
     )
-    .run(args.userId, args.organizationId, args.role, args.providerId ?? null);
+    .run(args.userId, args.organizationId, args.role, args.providerId ?? null, args.canAdmin ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +320,127 @@ export function getProvider(id: string): Provider | undefined {
   return r ? toProvider(r) : undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Provider settings — per-professional policy for MANUAL appointment changes
+// ---------------------------------------------------------------------------
+
+const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
+  whoCanChange: "anyone",
+  lateChangePolicy: "direct",
+};
+
+export function getProviderSettings(providerId: string): ProviderSettings {
+  const r = getDb()
+    .prepare("SELECT who_can_change, late_change_policy FROM provider_settings WHERE provider_id = ?")
+    .get(providerId) as Row | undefined;
+  if (!r) return { ...DEFAULT_PROVIDER_SETTINGS };
+  return {
+    whoCanChange: (r.who_can_change as ProviderSettings["whoCanChange"]) ?? "anyone",
+    lateChangePolicy: (r.late_change_policy as ProviderSettings["lateChangePolicy"]) ?? "direct",
+  };
+}
+
+export function setProviderSettings(providerId: string, patch: Partial<ProviderSettings>): ProviderSettings {
+  const next = { ...getProviderSettings(providerId), ...patch };
+  getDb()
+    .prepare(
+      `INSERT INTO provider_settings (provider_id, who_can_change, late_change_policy)
+       VALUES (@id, @who, @late)
+       ON CONFLICT(provider_id) DO UPDATE SET who_can_change = @who, late_change_policy = @late`,
+    )
+    .run({ id: providerId, who: next.whoCanChange, late: next.lateChangePolicy });
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// Appointment change requests (patient's < 24 h manual change, staff sign-off)
+// ---------------------------------------------------------------------------
+
+const toChangeRequest = (r: Row): AppointmentChangeRequest => ({
+  id: r.id as string,
+  organizationId: r.organization_id as string,
+  appointmentId: r.appointment_id as string,
+  providerId: r.provider_id as string,
+  patientId: r.patient_id as string,
+  kind: r.kind as ChangeRequestKind,
+  newSlotId: (r.new_slot_id as string) ?? undefined,
+  reason: (r.reason as string) ?? undefined,
+  requestedBy: r.requested_by as string,
+  createdAt: r.created_at as string,
+  status: r.status as ChangeRequestStatus,
+  decidedBy: (r.decided_by as string) ?? undefined,
+  decidedAt: (r.decided_at as string) ?? undefined,
+});
+
+export function createChangeRequest(args: {
+  organizationId: string;
+  appointmentId: string;
+  providerId: string;
+  patientId: string;
+  kind: ChangeRequestKind;
+  newSlotId?: string;
+  reason?: string;
+  requestedBy: string;
+}): AppointmentChangeRequest {
+  const id = uid("chg");
+  getDb()
+    .prepare(
+      `INSERT INTO appointment_change_requests
+        (id, organization_id, appointment_id, provider_id, patient_id, kind, new_slot_id, reason, requested_by, created_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+    )
+    .run(
+      id,
+      args.organizationId,
+      args.appointmentId,
+      args.providerId,
+      args.patientId,
+      args.kind,
+      args.newSlotId ?? null,
+      args.reason ?? null,
+      args.requestedBy,
+      new Date().toISOString(),
+    );
+  return getChangeRequest(id)!;
+}
+
+export function getChangeRequest(id: string): AppointmentChangeRequest | undefined {
+  const r = getDb().prepare("SELECT * FROM appointment_change_requests WHERE id = ?").get(id) as Row | undefined;
+  return r ? toChangeRequest(r) : undefined;
+}
+
+export function listChangeRequests(opts: {
+  organizationId?: string;
+  providerId?: string;
+  patientId?: string;
+  status?: ChangeRequestStatus;
+} = {}): AppointmentChangeRequest[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM appointment_change_requests
+       WHERE (@org IS NULL OR organization_id = @org)
+         AND (@provider IS NULL OR provider_id = @provider)
+         AND (@patient IS NULL OR patient_id = @patient)
+         AND (@status IS NULL OR status = @status)
+       ORDER BY created_at DESC`,
+    )
+    .all({
+      org: opts.organizationId ?? null,
+      provider: opts.providerId ?? null,
+      patient: opts.patientId ?? null,
+      status: opts.status ?? null,
+    }) as Row[];
+  return rows.map(toChangeRequest);
+}
+
+export function decideChangeRequest(id: string, args: { status: "approved" | "rejected"; decidedBy: string }): void {
+  getDb()
+    .prepare(
+      "UPDATE appointment_change_requests SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+    )
+    .run(args.status, args.decidedBy, new Date().toISOString(), id);
+}
+
 export function providerNameTakenInOrg(orgId: string, name: string): boolean {
   const t = normName(name);
   return (
@@ -291,18 +448,24 @@ export function providerNameTakenInOrg(orgId: string, name: string): boolean {
   ).some((r) => normName(r.name as string) === t);
 }
 
-/** Creates a professional in an org: provider + login (if new) + membership + slots. */
+/**
+ * Creates a professional in an org: provider + login (if new) + membership + slots.
+ * A person already registered (same email) is reused and just linked to this org
+ * with a fresh agenda — their existing PIN stays.
+ */
 export function createProfessional(args: {
   organizationId: string;
   name: string;
+  email: string;
   specialty: string;
   roomLabel: string;
   pinHash: string;
   pinSalt: string;
+  canAdmin?: boolean;
 }): { provider: Provider; userId: string; reusedUser: boolean } {
   const db = getDb();
   const providerId = uid("prov");
-  const existingUser = getUserByName(args.name);
+  const existingUser = getUserByEmail(args.email);
   const userId = existingUser?.id ?? uid("u");
   const reusedUser = Boolean(existingUser);
 
@@ -318,12 +481,12 @@ export function createProfessional(args: {
 
     if (!existingUser) {
       db.prepare(
-        "INSERT INTO users (id, name, role, pin_hash, pin_salt) VALUES (?, ?, 'medico', ?, ?)",
-      ).run(userId, args.name.trim(), args.pinHash, args.pinSalt);
+        "INSERT INTO users (id, name, email, role, pin_hash, pin_salt) VALUES (?, ?, ?, 'medico', ?, ?)",
+      ).run(userId, args.name.trim(), normEmail(args.email), args.pinHash, args.pinSalt);
     }
     db.prepare(
-      "INSERT OR REPLACE INTO memberships (user_id, organization_id, role, provider_id) VALUES (?, ?, 'medico', ?)",
-    ).run(userId, args.organizationId, providerId);
+      "INSERT OR REPLACE INTO memberships (user_id, organization_id, role, provider_id, can_admin) VALUES (?, ?, 'medico', ?, ?)",
+    ).run(userId, args.organizationId, providerId, args.canAdmin ? 1 : 0);
   });
   tx();
   return { provider: getProvider(providerId)!, userId, reusedUser };
@@ -382,22 +545,156 @@ export function createPatient(input: NewPatientInput): Patient {
   return getPatient(id)!;
 }
 
+export interface PatientPatch {
+  fullName?: string;
+  dni?: string;
+  dateOfBirth?: string;
+  phone?: string;
+  email?: string;
+  coverage?: string;
+  notes?: string | null;
+  allergies?: string[];
+  activeConditions?: string[];
+}
+
+/** Manual edit of a patient's ficha (staff). Only the provided fields change. */
+export function updatePatient(id: string, patch: PatientPatch): Patient | undefined {
+  const cols: Record<string, string> = {
+    fullName: "full_name",
+    dni: "dni",
+    dateOfBirth: "date_of_birth",
+    phone: "phone",
+    email: "email",
+    coverage: "coverage",
+  };
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  for (const [key, col] of Object.entries(cols)) {
+    const v = (patch as Record<string, unknown>)[key];
+    if (typeof v === "string") {
+      sets.push(`${col} = ?`);
+      vals.push(v.trim());
+    }
+  }
+  if (patch.notes !== undefined) {
+    sets.push("notes = ?");
+    vals.push(patch.notes === null ? null : patch.notes.trim() || null);
+  }
+  if (patch.allergies !== undefined) {
+    sets.push("allergies = ?");
+    vals.push(JSON.stringify(patch.allergies.map((s) => s.trim()).filter(Boolean)));
+  }
+  if (patch.activeConditions !== undefined) {
+    sets.push("active_conditions = ?");
+    vals.push(JSON.stringify(patch.activeConditions.map((s) => s.trim()).filter(Boolean)));
+  }
+  if (sets.length > 0) {
+    getDb().prepare(`UPDATE patients SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+  }
+  return getPatient(id);
+}
+
+// ---------------------------------------------------------------------------
+// Medications
+// ---------------------------------------------------------------------------
+
+export type MedicationRow = Medication & { id: string };
+
+export function listMedications(patientId: string): MedicationRow[] {
+  return (
+    getDb().prepare("SELECT * FROM medications WHERE patient_id = ? ORDER BY name").all(patientId) as Row[]
+  ).map((r) => ({ id: r.id as string, ...toMedication(r) }));
+}
+
+export function getMedication(id: string): (MedicationRow & { patientId: string }) | undefined {
+  const r = getDb().prepare("SELECT * FROM medications WHERE id = ?").get(id) as Row | undefined;
+  return r ? { id: r.id as string, patientId: r.patient_id as string, ...toMedication(r) } : undefined;
+}
+
+export function addMedication(args: {
+  patientId: string;
+  name: string;
+  dose: string;
+  lastPrescribed?: string;
+  chronic?: boolean;
+}): MedicationRow {
+  const id = uid("med");
+  getDb()
+    .prepare(
+      "INSERT INTO medications (id, patient_id, name, dose, last_prescribed, chronic) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .run(
+      id,
+      args.patientId,
+      args.name.trim(),
+      args.dose.trim(),
+      args.lastPrescribed?.trim() || DEMO_TODAY,
+      args.chronic ? 1 : 0,
+    );
+  return getMedication(id)!;
+}
+
+export function updateMedication(
+  id: string,
+  patch: { name?: string; dose?: string; lastPrescribed?: string; chronic?: boolean },
+): void {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (patch.name !== undefined) {
+    sets.push("name = ?");
+    vals.push(patch.name.trim());
+  }
+  if (patch.dose !== undefined) {
+    sets.push("dose = ?");
+    vals.push(patch.dose.trim());
+  }
+  if (patch.lastPrescribed !== undefined) {
+    sets.push("last_prescribed = ?");
+    vals.push(patch.lastPrescribed.trim());
+  }
+  if (patch.chronic !== undefined) {
+    sets.push("chronic = ?");
+    vals.push(patch.chronic ? 1 : 0);
+  }
+  if (sets.length === 0) return;
+  getDb().prepare(`UPDATE medications SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+}
+
+export function removeMedication(id: string): void {
+  getDb().prepare("DELETE FROM medications WHERE id = ?").run(id);
+}
+
 /** Search patients that belong to a given org. */
+/**
+ * Patients of an organization. With no `query` it returns everyone (ordered by
+ * name); with a query it filters by name, DNI, email, phone or id — digits-only
+ * on the query also match digits-only DNI / phone.
+ */
 export function searchPatients(orgId: string, query: string): Patient[] {
   const q = query.trim().toLowerCase();
-  if (!q) return [];
-  const bare = q.replace(/\./g, "");
+  const digits = q.replace(/\D/g, "");
   const rows = getDb()
     .prepare(
       `SELECT p.* FROM patients p
        JOIN patient_organizations po ON po.patient_id = p.id
        WHERE po.organization_id = @org
-         AND ( lower(p.full_name) LIKE @like
-            OR replace(p.dni, '.', '') LIKE @bare
+         AND ( @q = ''
+            OR lower(p.full_name) LIKE @like
             OR lower(p.email) LIKE @like
-            OR p.id = @exact )`,
+            OR lower(p.phone) LIKE @like
+            OR p.id = @exact
+            OR (@digits <> '' AND replace(replace(p.dni, '.', ''), ' ', '') LIKE @digitsLike)
+            OR (@digits <> '' AND replace(replace(replace(p.phone, '+', ''), '-', ''), ' ', '') LIKE @digitsLike) )
+       ORDER BY p.full_name`,
     )
-    .all({ org: orgId, like: `%${q}%`, bare: `%${bare}%`, exact: q }) as Row[];
+    .all({
+      org: orgId,
+      q,
+      like: `%${q}%`,
+      digits,
+      digitsLike: `%${digits}%`,
+      exact: q,
+    }) as Row[];
   return rows.map((r) => toPatient(r, medsFor(r.id as string)));
 }
 
@@ -542,6 +839,7 @@ export function bookSlot(args: {
   patientId: string;
   slotId: string;
   reason: string;
+  createdVia?: Appointment["createdVia"];
 }): Appointment {
   const db = getDb();
   return db.transaction(() => {
@@ -552,8 +850,17 @@ export function bookSlot(args: {
     const id = uid("apt");
     db.prepare(
       `INSERT INTO appointments (id, organization_id, patient_id, provider_id, start, duration_minutes, reason, status, created_via)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', 'agent')`,
-    ).run(id, args.organizationId, args.patientId, slot.providerId, slot.start, slot.durationMinutes, args.reason);
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)`,
+    ).run(
+      id,
+      args.organizationId,
+      args.patientId,
+      slot.providerId,
+      slot.start,
+      slot.durationMinutes,
+      args.reason,
+      args.createdVia ?? "agent",
+    );
     return getAppointment(id)!;
   })();
 }

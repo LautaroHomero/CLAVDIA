@@ -32,6 +32,7 @@ export function hydrateActor(claims: SessionClaims | null): Actor | null {
       role: active.role,
       providerId: active.providerId,
       specialty: active.specialty,
+      canAdmin: active.canAdmin,
     },
     orgs: mems.map((m) => ({ id: m.organizationId, name: m.organizationName })),
   };

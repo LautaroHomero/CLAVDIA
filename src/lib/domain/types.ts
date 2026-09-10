@@ -11,6 +11,7 @@ export interface Organization {
   name: string;
   slug: string;
   address: string;
+  city: string;
   hours: string;
   phone: string;
 }
@@ -25,11 +26,14 @@ export interface StaffOrg extends OrgRef {
   role: StaffRole;
   providerId?: string; // for medico
   specialty?: string;
+  /** May onboard professionals and manage the org (secretaría, or the org's founder). */
+  canAdmin: boolean;
 }
 
 export interface User {
   id: string;
   name: string;
+  email: string;
   role: Role;
   patientId?: string;
 }
@@ -99,6 +103,35 @@ export interface PriceItem {
   id: string;
   label: string;
   amount: number;
+}
+
+/** Who may change appointments on a professional's agenda by hand. */
+export type WhoCanChange = "anyone" | "staff_only";
+/** What happens to a patient's manual change requested with < 24 h notice. */
+export type LateChangePolicy = "direct" | "needs_approval";
+
+export interface ProviderSettings {
+  whoCanChange: WhoCanChange;
+  lateChangePolicy: LateChangePolicy;
+}
+
+export type ChangeRequestKind = "cancel" | "reschedule";
+export type ChangeRequestStatus = "pending" | "approved" | "rejected";
+
+export interface AppointmentChangeRequest {
+  id: string;
+  organizationId: string;
+  appointmentId: string;
+  providerId: string;
+  patientId: string;
+  kind: ChangeRequestKind;
+  newSlotId?: string;
+  reason?: string;
+  requestedBy: string;
+  createdAt: ISODateTime;
+  status: ChangeRequestStatus;
+  decidedBy?: string;
+  decidedAt?: ISODateTime;
 }
 
 export interface Slot {

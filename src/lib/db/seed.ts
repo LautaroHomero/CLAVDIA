@@ -5,9 +5,9 @@ import { generateSlotRows } from "./slots";
 
 /** Seeded organizations. */
 const ORGS = [
-  { id: "org_belgrano", name: "Consultorio Belgrano", slug: "belgrano", address: "Av. Cabildo 2200, piso 3, CABA", phone: "+54 11 4788-0000" },
-  { id: "org_palermo", name: "Centro Médico Palermo", slug: "palermo", address: "Av. Santa Fe 3800, CABA", phone: "+54 11 4823-1111" },
-  { id: "org_deporte", name: "Clínica del Deporte", slug: "deporte", address: "Av. Libertador 5000, CABA", phone: "+54 11 4700-2222" },
+  { id: "org_belgrano", name: "Consultorio Belgrano", slug: "belgrano", address: "Av. Cabildo 2200, piso 3", city: "CABA", phone: "+54 11 4788-0000" },
+  { id: "org_palermo", name: "Centro Médico Palermo", slug: "palermo", address: "Av. Santa Fe 3800", city: "CABA", phone: "+54 11 4823-1111" },
+  { id: "org_deporte", name: "Clínica del Deporte", slug: "deporte", address: "Av. Libertador 5000", city: "CABA", phone: "+54 11 4700-2222" },
 ] as const;
 
 /** Providers, each in one organization. */
@@ -28,19 +28,22 @@ const PRICES = [
   { org: "org_deporte", provider: "prov_d_ferrari", label: "Evaluación funcional", amount: 35000 },
 ] as const;
 
-/** Staff logins + their org memberships. */
+/**
+ * Staff logins + their org memberships. Login is by email; `admin: true` on a
+ * membership marks who may onboard professionals (secretaría / founder).
+ */
 const STAFF = [
-  { id: "u_ruiz", name: "Dra. Elena Ruiz", pin: "2468", memberships: [
-    { org: "org_belgrano", role: "medico", provider: "prov_b_ruiz" },
-    { org: "org_palermo", role: "medico", provider: "prov_p_ruiz" }, // trabaja en dos lugares
+  { id: "u_ruiz", name: "Dra. Elena Ruiz", email: "elena.ruiz@clavdia.test", pin: "2468", memberships: [
+    { org: "org_belgrano", role: "medico", provider: "prov_b_ruiz", admin: false },
+    { org: "org_palermo", role: "medico", provider: "prov_p_ruiz", admin: false }, // trabaja en dos lugares
   ] },
-  { id: "u_sosa", name: "Dr. Martín Sosa", pin: "1357", memberships: [{ org: "org_belgrano", role: "medico", provider: "prov_b_sosa" }] },
-  { id: "u_paz", name: "Dra. Sofía Paz", pin: "3690", memberships: [{ org: "org_palermo", role: "medico", provider: "prov_p_paz" }] },
-  { id: "u_bianchi", name: "Lic. Paula Bianchi", pin: "1470", memberships: [{ org: "org_palermo", role: "medico", provider: "prov_p_bianchi" }] },
-  { id: "u_ferrari", name: "Dr. Nicolás Ferrari", pin: "2580", memberships: [{ org: "org_deporte", role: "medico", provider: "prov_d_ferrari" }] },
-  { id: "u_recep_b", name: "Recepción Belgrano (Sofía)", pin: "1234", memberships: [{ org: "org_belgrano", role: "recepcion", provider: null }] },
-  { id: "u_recep_p", name: "Recepción Palermo (Diego)", pin: "4321", memberships: [{ org: "org_palermo", role: "recepcion", provider: null }] },
-  { id: "u_recep_d", name: "Recepción Deporte (Ana)", pin: "5678", memberships: [{ org: "org_deporte", role: "recepcion", provider: null }] },
+  { id: "u_sosa", name: "Dr. Martín Sosa", email: "martin.sosa@clavdia.test", pin: "1357", memberships: [{ org: "org_belgrano", role: "medico", provider: "prov_b_sosa", admin: false }] },
+  { id: "u_paz", name: "Dra. Sofía Paz", email: "sofia.paz@clavdia.test", pin: "3690", memberships: [{ org: "org_palermo", role: "medico", provider: "prov_p_paz", admin: false }] },
+  { id: "u_bianchi", name: "Lic. Paula Bianchi", email: "paula.bianchi@clavdia.test", pin: "1470", memberships: [{ org: "org_palermo", role: "medico", provider: "prov_p_bianchi", admin: false }] },
+  { id: "u_ferrari", name: "Dr. Nicolás Ferrari", email: "nicolas.ferrari@clavdia.test", pin: "2580", memberships: [{ org: "org_deporte", role: "medico", provider: "prov_d_ferrari", admin: true }] },
+  { id: "u_recep_b", name: "Sofía (secretaría · Belgrano)", email: "recepcion.belgrano@clavdia.test", pin: "1234", memberships: [{ org: "org_belgrano", role: "recepcion", provider: null, admin: true }] },
+  { id: "u_recep_p", name: "Diego (secretaría · Palermo)", email: "recepcion.palermo@clavdia.test", pin: "4321", memberships: [{ org: "org_palermo", role: "recepcion", provider: null, admin: true }] },
+  { id: "u_recep_d", name: "Ana (secretaría · Deporte)", email: "recepcion.deporte@clavdia.test", pin: "5678", memberships: [{ org: "org_deporte", role: "recepcion", provider: null, admin: true }] },
 ] as const;
 
 /** Patients: global ficha + which orgs they belong to + a login. */
@@ -90,9 +93,9 @@ export function seedIfEmpty(db: Database): void {
 
   const tx = db.transaction(() => {
     const org = db.prepare(
-      "INSERT INTO organizations (id, name, slug, address, hours, phone, created_at) VALUES (?, ?, ?, ?, 'Lunes a viernes de 8 a 18 h', ?, ?)",
+      "INSERT INTO organizations (id, name, slug, address, city, hours, phone, created_at) VALUES (?, ?, ?, ?, ?, 'Lunes a viernes de 8 a 18 h', ?, ?)",
     );
-    for (const o of ORGS) org.run(o.id, o.name, o.slug, o.address, o.phone, new Date().toISOString());
+    for (const o of ORGS) org.run(o.id, o.name, o.slug, o.address, o.city, o.phone, new Date().toISOString());
 
     const provider = db.prepare(
       "INSERT INTO providers (id, organization_id, name, specialty, room_label, default_fee) VALUES (?, ?, ?, ?, ?, ?)",
@@ -117,7 +120,7 @@ export function seedIfEmpty(db: Database): void {
       "INSERT INTO patient_organizations (patient_id, organization_id, joined_at) VALUES (?, ?, ?)",
     );
     const user = db.prepare(
-      "INSERT INTO users (id, name, role, pin_hash, pin_salt, patient_id) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO users (id, name, email, role, pin_hash, pin_salt, patient_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
     );
     for (const p of PATIENTS) {
       patient.run({
@@ -128,7 +131,7 @@ export function seedIfEmpty(db: Database): void {
       for (const o of p.orgs) patOrg.run(p.id, o, new Date().toISOString());
       if (p.login) {
         const { hash, salt } = hashPin(p.login.pin);
-        user.run(p.login.id, p.name, "paciente", hash, salt, p.id);
+        user.run(p.login.id, p.name, p.email, "paciente", hash, salt, p.id);
       }
     }
 
@@ -138,15 +141,15 @@ export function seedIfEmpty(db: Database): void {
     for (const m of MEDS) med.run(...m);
 
     const staffUser = db.prepare(
-      "INSERT INTO users (id, name, role, pin_hash, pin_salt) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO users (id, name, email, role, pin_hash, pin_salt) VALUES (?, ?, ?, ?, ?, ?)",
     );
     const membership = db.prepare(
-      "INSERT INTO memberships (user_id, organization_id, role, provider_id) VALUES (?, ?, ?, ?)",
+      "INSERT INTO memberships (user_id, organization_id, role, provider_id, can_admin) VALUES (?, ?, ?, ?, ?)",
     );
     for (const s of STAFF) {
       const { hash, salt } = hashPin(s.pin);
-      staffUser.run(s.id, s.name, s.memberships[0].role, hash, salt);
-      for (const m of s.memberships) membership.run(s.id, m.org, m.role, m.provider);
+      staffUser.run(s.id, s.name, s.email, s.memberships[0].role, hash, salt);
+      for (const m of s.memberships) membership.run(s.id, m.org, m.role, m.provider, m.admin ? 1 : 0);
     }
 
     // ── Live agenda demo: Consultorio Belgrano, Dra. Ruiz ──────────────────

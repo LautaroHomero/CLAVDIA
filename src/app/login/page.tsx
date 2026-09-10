@@ -2,26 +2,33 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { SPECIALTIES } from "@/lib/domain/specialties";
 
-type Screen = "pick" | "login-profesional" | "login-paciente" | "signup" | "new-org";
-type OrgOpt = { id: string; name: string; address?: string; role?: string };
-
-const norm = (s: string) =>
-  s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+type Screen = "login" | "signup" | "new-org";
+type OrgOpt = { id: string; name: string; address?: string; city?: string };
+type FounderRole = "recepcion" | "medico";
+const OTHER_SPECIALTY = "__other__";
 
 const FIELD =
   "w-full rounded-md border border-hairline bg-surface px-3.5 py-2.5 text-[16px] text-ink placeholder:text-muted/70 transition-colors focus:border-ink focus:outline-none";
 const PRIMARY =
   "w-full rounded-md bg-ink px-4 py-2.5 text-[16px] font-semibold text-white transition-colors hover:bg-ink-hover disabled:opacity-40";
+const GHOST =
+  "w-full rounded-md border border-hairline px-4 py-2.5 text-[15px] font-semibold text-ink transition-colors hover:border-ink disabled:opacity-40";
 const CARD = "rounded-xl border border-hairline bg-surface p-5 shadow-card";
+const LINK =
+  "text-[13px] font-medium text-muted underline decoration-hairline-strong underline-offset-4 hover:text-ink";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [screen, setScreen] = useState<Screen>("pick");
+  const [screen, setScreen] = useState<Screen>("login");
   const [orgs, setOrgs] = useState<OrgOpt[]>([]);
 
   useEffect(() => {
-    fetch("/api/organizations").then((r) => r.json()).then((d) => setOrgs(d.organizations ?? [])).catch(() => {});
+    fetch("/api/organizations")
+      .then((r) => r.json())
+      .then((d) => setOrgs(d.organizations ?? []))
+      .catch(() => {});
   }, []);
 
   const go = () => {
@@ -30,60 +37,40 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-[440px] flex-col justify-center gap-6 px-6 py-10">
+    <main className="mx-auto flex min-h-screen w-full max-w-[460px] flex-col justify-center gap-6 px-6 py-10">
       <header className="space-y-1.5">
-        <h1 className="text-[18px] font-semibold tracking-tight text-ink">CLAVDIA Secretario médico</h1>
+        <h1 className="text-[18px] font-semibold tracking-tight text-ink">CLAVDIA · Secretario médico</h1>
         <p className="text-[14px] text-muted">Plataforma multi-consultorio.</p>
       </header>
 
-      {screen === "pick" && (
-        <div className="space-y-3">
-          <Choice title="Soy paciente" subtitle="Ver mis turnos, sacar turno, pedir mi receta"
-            onClick={() => setScreen("login-paciente")} />
-          <Choice title="Soy profesional" subtitle="Médico/a de cualquier especialidad, psicólogo/a o recepción"
-            onClick={() => setScreen("login-profesional")} />
-          <button
-            onClick={() => setScreen("new-org")}
-            className="pt-1 text-[13px] font-medium text-muted underline decoration-hairline-strong underline-offset-4 hover:text-ink"
-          >
-            Registrar un consultorio nuevo
-          </button>
+      {screen === "login" && (
+        <div className="space-y-4">
+          <div className={CARD}>
+            <EmailLogin onDone={go} />
+          </div>
+          <div className="flex flex-col items-start gap-2">
+            <button onClick={() => setScreen("new-org")} className={LINK}>
+              Registrar un consultorio nuevo
+            </button>
+            <button onClick={() => setScreen("signup")} className={LINK}>
+              Soy paciente y no tengo cuenta
+            </button>
+          </div>
         </div>
       )}
 
-      {screen === "login-profesional" && (
-        <Framed onBack={() => setScreen("pick")}>
-          <ProfesionalLogin orgs={orgs} onDone={go} />
-        </Framed>
-      )}
-
-      {screen === "login-paciente" && (
-        <Framed onBack={() => setScreen("pick")}>
-          <PacienteLogin onDone={go} onSignup={() => setScreen("signup")} />
-        </Framed>
-      )}
-
       {screen === "signup" && (
-        <Framed onBack={() => setScreen("login-paciente")}>
+        <Framed onBack={() => setScreen("login")}>
           <PacienteSignup orgs={orgs} onDone={go} />
         </Framed>
       )}
 
       {screen === "new-org" && (
-        <Framed onBack={() => setScreen("pick")}>
-          <NewOrg onDone={go} />
+        <Framed onBack={() => setScreen("login")}>
+          <NewOrgWizard onDone={go} />
         </Framed>
       )}
     </main>
-  );
-}
-
-function Choice({ title, subtitle, onClick }: { title: string; subtitle: string; onClick: () => void }) {
-  return (
-    <button onClick={onClick} className={`${CARD} w-full text-left transition-all hover:border-ink`}>
-      <span className="block text-[16px] font-semibold text-ink">{title}</span>
-      <span className="mt-0.5 block text-[13px] text-muted">{subtitle}</span>
-    </button>
   );
 }
 
@@ -102,33 +89,34 @@ function Err({ msg }: { msg: string }) {
   return msg ? <p className="text-[13px] text-[#c0392b]">{msg}</p> : null;
 }
 
-function ProfesionalLogin({ orgs, onDone }: { orgs: OrgOpt[]; onDone: () => void }) {
-  const [query, setQuery] = useState("");
-  const [org, setOrg] = useState<OrgOpt | null>(null);
-  const [name, setName] = useState("");
+// ---------------------------------------------------------------------------
+// Login — email + PIN, with the multi-org picker
+// ---------------------------------------------------------------------------
+
+function EmailLogin({ onDone }: { onDone: () => void }) {
+  const [email, setEmail] = useState("");
   const [pin, setPin] = useState("");
+  const [pending, setPending] = useState<OrgOpt[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const q = norm(query.trim());
-  const matches = q
-    ? orgs.filter((o) => norm(`${o.name} ${o.address ?? ""}`).includes(q))
-    : orgs;
-
-  async function submit() {
-    if (!org) return;
+  async function submit(organizationId?: string) {
     setBusy(true);
     setError("");
     try {
       const r = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: "profesional", name, pin, organizationId: org.id }),
+        body: JSON.stringify({ email: email.trim(), pin, organizationId }),
       });
       const d = await r.json();
       if (!r.ok || !d.ok) {
         setError(d.error ?? "No se pudo iniciar sesión.");
         setPin("");
+        return;
+      }
+      if (d.needsOrg) {
+        setPending(d.organizations);
         return;
       }
       onDone();
@@ -137,49 +125,46 @@ function ProfesionalLogin({ orgs, onDone }: { orgs: OrgOpt[]; onDone: () => void
     }
   }
 
-  // Step 1 — find your workplace
-  if (!org) {
+  if (pending) {
     return (
       <div className="space-y-3">
-        <label className="block text-[13px] font-semibold text-ink">¿Dónde trabajás?</label>
-        <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)}
-          placeholder="Buscá tu consultorio por nombre o dirección" className={FIELD} />
-        <div className="space-y-1.5">
-          {matches.map((o) => (
-            <button key={o.id} onClick={() => { setOrg(o); setError(""); }}
-              className="w-full rounded-md border border-hairline px-3.5 py-2.5 text-left transition-colors hover:border-ink">
-              <span className="block text-[15px] text-ink">{o.name}</span>
-              {o.address && <span className="mt-0.5 block text-[12px] text-muted">{o.address}</span>}
-            </button>
-          ))}
-          {matches.length === 0 && (
-            <p className="text-[13px] text-muted">
-              No encontramos consultorios con “{query.trim()}”.
-            </p>
-          )}
-        </div>
+        <p className="text-[14px] font-semibold text-ink">¿En qué consultorio entrás?</p>
+        {pending.map((o) => (
+          <button
+            key={o.id}
+            onClick={() => submit(o.id)}
+            disabled={busy}
+            className="w-full rounded-md border border-hairline px-3.5 py-2.5 text-left text-[15px] transition-colors hover:border-ink"
+          >
+            {o.name}
+          </button>
+        ))}
+        <Err msg={error} />
       </div>
     );
   }
 
-  // Step 2 — credentials for the chosen workplace
   return (
     <div className="space-y-3">
-      <div className="rounded-md border border-hairline bg-canvas px-3.5 py-2.5">
-        <span className="block text-[15px] text-ink">{org.name}</span>
-        {org.address && <span className="mt-0.5 block text-[12px] text-muted">{org.address}</span>}
-        <button onClick={() => { setOrg(null); setName(""); setPin(""); setError(""); }}
-          className="mt-1.5 text-[12px] font-medium text-muted underline decoration-hairline-strong underline-offset-4 hover:text-ink">
-          cambiar de consultorio
-        </button>
-      </div>
-      <label className="block text-[13px] font-semibold text-ink">Nombre</label>
-      <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Tu nombre" className={FIELD} />
+      <label className="block text-[13px] font-semibold text-ink">Email</label>
+      <input
+        autoFocus
+        type="email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        placeholder="tu@email.com"
+        className={FIELD}
+      />
       <label className="block text-[13px] font-semibold text-ink">PIN</label>
-      <input value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-        onKeyDown={(e) => e.key === "Enter" && submit()} inputMode="numeric" placeholder="4 dígitos"
-        className={`${FIELD} text-center text-[20px] tracking-[0.4em]`} />
-      <button onClick={submit} disabled={busy || !name.trim() || pin.length < 4} className={PRIMARY}>
+      <input
+        value={pin}
+        onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+        inputMode="numeric"
+        placeholder="4 dígitos"
+        className={`${FIELD} text-center text-[20px] tracking-[0.4em]`}
+      />
+      <button onClick={() => submit()} disabled={busy || !email.trim() || pin.length < 4} className={PRIMARY}>
         Entrar
       </button>
       <Err msg={error} />
@@ -187,53 +172,19 @@ function ProfesionalLogin({ orgs, onDone }: { orgs: OrgOpt[]; onDone: () => void
   );
 }
 
-function PacienteLogin({ onDone, onSignup }: { onDone: () => void; onSignup: () => void }) {
-  const [name, setName] = useState("");
-  const [pin, setPin] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function submit() {
-    setBusy(true);
-    setError("");
-    try {
-      const r = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: "paciente", name, pin }),
-      });
-      const d = await r.json();
-      if (!r.ok || !d.ok) {
-        setError(d.error ?? "No se pudo iniciar sesión.");
-        setPin("");
-        return;
-      }
-      onDone();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="space-y-3">
-      <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Tu nombre y apellido" className={FIELD} />
-      <input value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-        onKeyDown={(e) => e.key === "Enter" && submit()} inputMode="numeric" placeholder="PIN de 4 dígitos"
-        className={`${FIELD} text-center text-[20px] tracking-[0.4em]`} />
-      <button onClick={submit} disabled={busy || !name.trim() || pin.length < 4} className={PRIMARY}>
-        Entrar
-      </button>
-      <Err msg={error} />
-      <button onClick={onSignup} className="text-[13px] font-medium text-muted underline decoration-hairline-strong underline-offset-4 hover:text-ink">
-        ¿Sos nuevo/a? Registrate
-      </button>
-    </div>
-  );
-}
+// ---------------------------------------------------------------------------
+// Patient self-signup
+// ---------------------------------------------------------------------------
 
 function PacienteSignup({ orgs, onDone }: { orgs: OrgOpt[]; onDone: () => void }) {
   const [f, setF] = useState({
-    fullName: "", dni: "", dateOfBirth: "", coverage: "", phone: "", email: "", pin: "",
+    fullName: "",
+    dni: "",
+    dateOfBirth: "",
+    coverage: "",
+    email: "",
+    phone: "",
+    pin: "",
     organizationId: orgs[0]?.id ?? "",
   });
   const [error, setError] = useState("");
@@ -264,31 +215,73 @@ function PacienteSignup({ orgs, onDone }: { orgs: OrgOpt[]; onDone: () => void }
 
   return (
     <div className="space-y-2.5">
-      <p className="text-[13px] text-muted">Alta de paciente. Elegí en qué consultorio te querés atender (después podés sumarte a más).</p>
+      <p className="text-[13px] text-muted">
+        Alta de paciente. El <strong>email</strong> te va a servir para entrar. Elegí un consultorio
+        (después podés sumarte a más).
+      </p>
       <input value={f.fullName} onChange={set("fullName")} placeholder="Nombre y apellido" className={FIELD} />
       <input value={f.dni} onChange={set("dni")} placeholder="DNI" className={FIELD} />
       <input value={f.dateOfBirth} onChange={set("dateOfBirth")} placeholder="Fecha de nacimiento (AAAA-MM-DD)" className={FIELD} />
       <input value={f.coverage} onChange={set("coverage")} placeholder="Cobertura (obra social / prepaga)" className={FIELD} />
+      <input type="email" value={f.email} onChange={set("email")} placeholder="Email (para ingresar)" className={FIELD} />
+      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono (opcional)" className={FIELD} />
       <select value={f.organizationId} onChange={set("organizationId")} className={FIELD}>
         {orgs.map((o) => (
-          <option key={o.id} value={o.id}>{o.name}</option>
+          <option key={o.id} value={o.id}>
+            {o.name}
+          </option>
         ))}
       </select>
-      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono (opcional)" className={FIELD} />
-      <input value={f.email} onChange={set("email")} placeholder="Email (opcional)" className={FIELD} />
-      <input value={f.pin} onChange={set("pin")} inputMode="numeric" placeholder="Elegí un PIN de 4 dígitos"
-        className={`${FIELD} text-center tracking-[0.4em]`} />
-      <button onClick={submit} disabled={busy} className={PRIMARY}>Crear cuenta y entrar</button>
+      <input
+        value={f.pin}
+        onChange={set("pin")}
+        inputMode="numeric"
+        placeholder="Elegí un PIN de 4 dígitos"
+        className={`${FIELD} text-center tracking-[0.4em]`}
+      />
+      <button onClick={submit} disabled={busy} className={PRIMARY}>
+        Crear cuenta y entrar
+      </button>
       <Err msg={error} />
     </div>
   );
 }
 
-function NewOrg({ onDone }: { onDone: () => void }) {
-  const [f, setF] = useState({ orgName: "", address: "", receptionName: "", pin: "" });
+// ---------------------------------------------------------------------------
+// New organization — 3-step wizard
+// ---------------------------------------------------------------------------
+
+const STEPS = ["El consultorio", "Tu cuenta", "Confirmar"] as const;
+
+function NewOrgWizard({ onDone }: { onDone: () => void }) {
+  const [step, setStep] = useState(0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value });
+  const [f, setF] = useState({
+    orgName: "",
+    address: "",
+    city: "",
+    phone: "",
+    hours: "Lunes a viernes de 8 a 18 h",
+    founderName: "",
+    founderEmail: "",
+    pin: "",
+    founderRole: "recepcion" as FounderRole,
+    specialty: "",
+    specialtyOther: "",
+    roomLabel: "",
+  });
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setF({ ...f, [k]: e.target.value });
+
+  const specialty = f.specialty === OTHER_SPECIALTY ? f.specialtyOther.trim() : f.specialty;
+  const step1ok = f.orgName.trim().length > 1;
+  const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.founderEmail.trim());
+  const step2ok =
+    f.founderName.trim().length > 1 &&
+    emailOk &&
+    /^\d{4}$/.test(f.pin) &&
+    (f.founderRole === "recepcion" || specialty.length > 1);
 
   async function submit() {
     setBusy(true);
@@ -297,10 +290,17 @@ function NewOrg({ onDone }: { onDone: () => void }) {
       const r = await fetch("/api/organizations", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...f, pin: f.pin.replace(/\D/g, "").slice(0, 4) }),
+        body: JSON.stringify({
+          ...f,
+          pin: f.pin.replace(/\D/g, "").slice(0, 4),
+          specialty: f.founderRole === "medico" ? specialty : undefined,
+        }),
       });
       const d = await r.json();
-      if (!r.ok || !d.ok) return setError(d.error ?? "No se pudo crear.");
+      if (!r.ok || !d.ok) {
+        setError(d.error ?? "No se pudo crear.");
+        return;
+      }
       onDone();
     } finally {
       setBusy(false);
@@ -308,17 +308,161 @@ function NewOrg({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div className="space-y-2.5">
-      <p className="text-[13px] text-muted">
-        Crea la organización y tu usuario de <strong>recepción</strong>. Después, desde el chat, das de alta a los profesionales.
-      </p>
-      <input autoFocus value={f.orgName} onChange={set("orgName")} placeholder="Nombre del consultorio" className={FIELD} />
-      <input value={f.address} onChange={set("address")} placeholder="Dirección (opcional)" className={FIELD} />
-      <input value={f.receptionName} onChange={set("receptionName")} placeholder="Tu nombre (recepción)" className={FIELD} />
-      <input value={f.pin} onChange={set("pin")} inputMode="numeric" placeholder="PIN de 4 dígitos"
-        className={`${FIELD} text-center tracking-[0.4em]`} />
-      <button onClick={submit} disabled={busy} className={PRIMARY}>Crear consultorio y entrar</button>
-      <Err msg={error} />
+    <div className="space-y-4">
+      <div className="flex items-start gap-1.5">
+        {STEPS.map((label, i) => (
+          <div key={label} className="flex flex-1 flex-col gap-1">
+            <div className={`h-1 rounded-full ${i <= step ? "bg-ink" : "bg-hairline"}`} aria-hidden />
+            <span className={`text-[11px] ${i === step ? "font-semibold text-ink" : "text-muted"}`}>
+              {i + 1}. {label}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {step === 0 && (
+        <div className="space-y-2.5">
+          <p className="text-[13px] text-muted">Dónde queda y cómo se llama.</p>
+          <input autoFocus value={f.orgName} onChange={set("orgName")} placeholder="Nombre del consultorio" className={FIELD} />
+          <input value={f.address} onChange={set("address")} placeholder="Dirección (calle y número)" className={FIELD} />
+          <input value={f.city} onChange={set("city")} placeholder="Localidad / ciudad" className={FIELD} />
+          <input value={f.phone} onChange={set("phone")} placeholder="Teléfono de contacto" className={FIELD} />
+          <input value={f.hours} onChange={set("hours")} placeholder="Días y horarios de atención" className={FIELD} />
+          <button onClick={() => setStep(1)} disabled={!step1ok} className={PRIMARY}>
+            Continuar
+          </button>
+        </div>
+      )}
+
+      {step === 1 && (
+        <div className="space-y-2.5">
+          <p className="text-[13px] text-muted">Tu usuario para administrar el consultorio.</p>
+          <input autoFocus value={f.founderName} onChange={set("founderName")} placeholder="Tu nombre completo" className={FIELD} />
+          <input type="email" value={f.founderEmail} onChange={set("founderEmail")} placeholder="Email (para ingresar)" className={FIELD} />
+          <input
+            value={f.pin}
+            onChange={(e) => setF({ ...f, pin: e.target.value.replace(/\D/g, "").slice(0, 4) })}
+            inputMode="numeric"
+            placeholder="Elegí un PIN de 4 dígitos"
+            className={`${FIELD} text-center tracking-[0.4em]`}
+          />
+
+          <p className="pt-1 text-[13px] font-semibold text-ink">¿Cómo vas a usar la plataforma?</p>
+          <div className="grid grid-cols-1 gap-2">
+            <RoleOption
+              active={f.founderRole === "recepcion"}
+              title="Secretaría administrativa"
+              desc="Gestiono la agenda, doy de alta pacientes y profesionales."
+              onClick={() => setF({ ...f, founderRole: "recepcion" })}
+            />
+            <RoleOption
+              active={f.founderRole === "medico"}
+              title="Profesional de la salud"
+              desc="Atiendo pacientes. Como fundador/a, también podés dar de alta a otros."
+              onClick={() => setF({ ...f, founderRole: "medico" })}
+            />
+          </div>
+
+          {f.founderRole === "medico" && (
+            <>
+              <select value={f.specialty} onChange={set("specialty")} className={FIELD}>
+                <option value="">Tipo de profesional…</option>
+                {SPECIALTIES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+                <option value={OTHER_SPECIALTY}>Otra…</option>
+              </select>
+              {f.specialty === OTHER_SPECIALTY && (
+                <input
+                  value={f.specialtyOther}
+                  onChange={set("specialtyOther")}
+                  placeholder="Especificá la especialidad / profesión"
+                  className={FIELD}
+                />
+              )}
+              <input value={f.roomLabel} onChange={set("roomLabel")} placeholder="Consultorio / box (opcional)" className={FIELD} />
+            </>
+          )}
+
+          <div className="flex gap-2">
+            <button onClick={() => setStep(0)} className={GHOST}>
+              Atrás
+            </button>
+            <button onClick={() => setStep(2)} disabled={!step2ok} className={PRIMARY}>
+              Continuar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div className="space-y-3">
+          <p className="text-[13px] text-muted">Revisá antes de crear.</p>
+          <dl className="space-y-1.5 rounded-md border border-hairline bg-canvas p-3.5 text-[13px]">
+            <Review label="Consultorio" value={f.orgName} />
+            <Review label="Dirección" value={[f.address, f.city].filter(Boolean).join(", ")} />
+            <Review label="Teléfono" value={f.phone} />
+            <Review label="Horarios" value={f.hours} />
+            <Review label="Tu nombre" value={f.founderName} />
+            <Review label="Email" value={f.founderEmail} />
+            <Review
+              label="Rol"
+              value={
+                f.founderRole === "recepcion"
+                  ? "Secretaría administrativa"
+                  : `Profesional · ${specialty}${f.roomLabel ? ` · ${f.roomLabel}` : ""}`
+              }
+            />
+          </dl>
+          <p className="text-[12px] text-muted">
+            Después vas a poder dar de alta profesionales y pacientes desde la vista Sistema o el chat.
+          </p>
+          <div className="flex gap-2">
+            <button onClick={() => setStep(1)} className={GHOST}>
+              Atrás
+            </button>
+            <button onClick={submit} disabled={busy} className={PRIMARY}>
+              Crear consultorio y entrar
+            </button>
+          </div>
+          <Err msg={error} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RoleOption({
+  active,
+  title,
+  desc,
+  onClick,
+}: {
+  active: boolean;
+  title: string;
+  desc: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-md border px-3.5 py-2.5 text-left transition-colors ${
+        active ? "border-ink bg-ink text-white" : "border-hairline text-ink hover:border-ink"
+      }`}
+    >
+      <span className="block text-[14px] font-semibold">{title}</span>
+      <span className={`mt-0.5 block text-[12px] ${active ? "text-white/80" : "text-muted"}`}>{desc}</span>
+    </button>
+  );
+}
+
+function Review({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex gap-2">
+      <dt className="w-24 shrink-0 text-muted">{label}</dt>
+      <dd className="min-w-0 flex-1 text-ink">{value || "—"}</dd>
     </div>
   );
 }

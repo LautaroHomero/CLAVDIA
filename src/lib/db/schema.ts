@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS organizations (
   name       TEXT NOT NULL,
   slug       TEXT NOT NULL,
   address    TEXT NOT NULL DEFAULT '',
+  city       TEXT NOT NULL DEFAULT '',
   hours      TEXT NOT NULL DEFAULT 'Lunes a viernes de 8 a 18 h',
   phone      TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
@@ -15,12 +16,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug_unique ON organizations (sl
 CREATE TABLE IF NOT EXISTS users (
   id       TEXT PRIMARY KEY,
   name     TEXT NOT NULL,
+  email    TEXT NOT NULL DEFAULT '',    -- login identifier for every role
   role     TEXT NOT NULL,               -- medico | recepcion | paciente
   pin_hash TEXT NOT NULL,
   pin_salt TEXT NOT NULL,
   patient_id TEXT REFERENCES patients(id)  -- only for role = paciente
 );
 CREATE UNIQUE INDEX IF NOT EXISTS users_name_unique ON users (lower(trim(name)));
+-- users_email_unique is created in migrate.ts (it references a column that older
+-- databases don't have yet, so it can't live in this always-applied block).
 
 -- A staff user's link to an organization (a professional can be in several).
 CREATE TABLE IF NOT EXISTS memberships (
@@ -28,6 +32,7 @@ CREATE TABLE IF NOT EXISTS memberships (
   organization_id TEXT NOT NULL REFERENCES organizations(id),
   role            TEXT NOT NULL,        -- medico | recepcion
   provider_id     TEXT REFERENCES providers(id),  -- for medico: their provider record in that org
+  can_admin       INTEGER NOT NULL DEFAULT 0,     -- may onboard professionals / manage the org
   PRIMARY KEY (user_id, organization_id)
 );
 
@@ -78,6 +83,13 @@ CREATE TABLE IF NOT EXISTS provider_prices (
   provider_id     TEXT NOT NULL REFERENCES providers(id),
   label           TEXT NOT NULL,
   amount          INTEGER NOT NULL
+);
+
+-- Per-professional policy for MANUAL appointment changes (set by the médico).
+CREATE TABLE IF NOT EXISTS provider_settings (
+  provider_id        TEXT PRIMARY KEY REFERENCES providers(id),
+  who_can_change     TEXT NOT NULL DEFAULT 'anyone',   -- anyone | staff_only
+  late_change_policy TEXT NOT NULL DEFAULT 'direct'    -- direct | needs_approval
 );
 
 CREATE TABLE IF NOT EXISTS slots (
@@ -162,6 +174,24 @@ CREATE TABLE IF NOT EXISTS patient_notices (
   created_at      TEXT NOT NULL,
   message         TEXT NOT NULL,
   resolved        INTEGER NOT NULL DEFAULT 0
+);
+
+-- Manual appointment changes a patient asked for that need staff sign-off
+-- (only created when the provider's late_change_policy = 'needs_approval').
+CREATE TABLE IF NOT EXISTS appointment_change_requests (
+  id              TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  appointment_id  TEXT NOT NULL REFERENCES appointments(id),
+  provider_id     TEXT NOT NULL REFERENCES providers(id),
+  patient_id      TEXT NOT NULL REFERENCES patients(id),
+  kind            TEXT NOT NULL,                    -- cancel | reschedule
+  new_slot_id     TEXT,                             -- reschedule only
+  reason          TEXT,
+  requested_by    TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
+  decided_by      TEXT,
+  decided_at      TEXT
 );
 
 -- Stored end-of-day summaries. provider_id = '' means the org-wide report.

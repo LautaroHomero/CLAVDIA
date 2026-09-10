@@ -1,44 +1,40 @@
-import { getUserByName, membershipsForUser } from "@/lib/db/repo";
+import { getUserByEmail, membershipsForUser } from "@/lib/db/repo";
 import { verifyPin } from "@/lib/auth/pin";
 import { hydrateActor } from "@/lib/auth/actor";
 import { sessionSetCookie, signSession, type SessionClaims } from "@/lib/auth/session";
 
-type LoginKind = "paciente" | "profesional";
-
+/**
+ * Unified login: email + PIN for every role. Staff with more than one
+ * organization and no `organizationId` get `{ needsOrg: true, organizations }`
+ * so the client can ask which one to enter.
+ */
 export async function POST(req: Request) {
-  const { kind, name, pin, organizationId } = (await req.json()) as {
-    kind?: LoginKind;
-    name?: string;
+  const { email, pin, organizationId } = (await req.json()) as {
+    email?: string;
     pin?: string;
     organizationId?: string;
   };
 
-  if (!kind || !name?.trim() || !pin) {
-    return Response.json({ ok: false, error: "Faltan datos." }, { status: 400 });
+  if (!email?.trim() || !pin) {
+    return Response.json({ ok: false, error: "Ingresá tu email y tu PIN." }, { status: 400 });
   }
 
-  const user = getUserByName(name);
+  const user = getUserByEmail(email);
   if (!user || !verifyPin(pin, user.pinHash, user.pinSalt)) {
-    return Response.json({ ok: false, error: "Nombre o PIN incorrecto." }, { status: 401 });
-  }
-
-  const isPatient = user.role === "paciente";
-  if (isPatient !== (kind === "paciente")) {
-    return Response.json(
-      { ok: false, error: "Ese usuario no corresponde a ese perfil." },
-      { status: 401 },
-    );
+    return Response.json({ ok: false, error: "Email o PIN incorrecto." }, { status: 401 });
   }
 
   const claims: SessionClaims = { userId: user.id, role: user.role, patientId: user.patientId };
 
-  if (!isPatient) {
+  if (user.role !== "paciente") {
     const mems = membershipsForUser(user.id);
     if (mems.length === 0) {
-      return Response.json({ ok: false, error: "Ese usuario no está en ninguna organización." }, { status: 403 });
+      return Response.json(
+        { ok: false, error: "Ese usuario no está en ninguna organización." },
+        { status: 403 },
+      );
     }
     if (mems.length > 1 && !organizationId) {
-      // ask the client to pick which org
       return Response.json({
         ok: true,
         needsOrg: true,
