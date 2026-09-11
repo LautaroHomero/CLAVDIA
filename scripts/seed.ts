@@ -8,7 +8,7 @@ if (!url) {
   process.exit(1);
 }
 
-const sql = postgres(url, { prepare: false, max: 1 });
+const sql = postgres(url, { prepare: false, max: 1, ssl: "require" });
 try {
   const seeded = await seedIfEmpty(sql);
   console.log(seeded ? "Seed aplicado." : "La base ya tenía datos — no se tocó.");

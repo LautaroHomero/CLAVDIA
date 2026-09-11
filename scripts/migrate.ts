@@ -8,7 +8,7 @@ if (!url) {
   process.exit(1);
 }
 
-const sql = postgres(url, { prepare: false, max: 1 });
+const sql = postgres(url, { prepare: false, max: 1, ssl: "require" });
 try {
   const ran = await migrate(sql);
   console.log(ran.length ? `Migraciones aplicadas: ${ran.join(", ")}` : "Nada pendiente.");

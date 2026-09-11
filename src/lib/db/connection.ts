@@ -28,6 +28,9 @@ export function getSql(): Sql {
     max: Number(process.env.DB_POOL_MAX ?? 10),
     idle_timeout: 20,
     connection: { application_name: "clavdia" },
+    // Supabase requires TLS; the URL's own `sslmode` (if any) still wins since
+    // postgres.js reads it from the query string and overrides this default.
+    ssl: "require",
   });
   return globalForDb.__sql;
 }
