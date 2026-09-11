@@ -6,13 +6,13 @@ import { isSlackEnabled } from "@/lib/slack/client";
 
 /** Pending human-in-the-loop requests, scoped to the caller's role and org. */
 export async function GET(req: Request) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) return Response.json({ error: "No autenticado." }, { status: 401 });
 
-  let pending =
+  const pending =
     actor.role === "paciente"
-      ? listPendingRequests().filter((r) => r.requestedBy === actor.name)
-      : listPendingRequests(actor.activeOrg?.id);
+      ? (await listPendingRequests()).filter((r) => r.requestedBy === actor.name)
+      : await listPendingRequests(actor.activeOrg?.id);
 
   return Response.json({
     slackEnabled: isSlackEnabled(),
@@ -30,7 +30,7 @@ interface DecisionBody {
 
 /** Resume a suspended workflow with a human decision (used by the web UI). */
 export async function POST(req: Request) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) return Response.json({ error: "No autenticado." }, { status: 401 });
 
   const body = (await req.json()) as DecisionBody;
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
     return Response.json({ ok: false, error: "Falta 'token'." }, { status: 400 });
   }
 
-  const pending = getPendingRequest(body.token);
+  const pending = await getPendingRequest(body.token);
   if (!pending) {
     return Response.json(
       { ok: false, error: "Esa solicitud ya no está pendiente (resuelta o expirada)." },

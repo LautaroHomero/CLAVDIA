@@ -21,7 +21,7 @@ import type {
   User,
 } from "@/lib/domain/types";
 import { DEMO_TODAY } from "@/lib/domain/clock";
-import { getDb } from "./connection";
+import { getSql } from "./connection";
 import { generateSlotRows } from "./slots";
 
 const TODAY = DEMO_TODAY;
@@ -38,7 +38,7 @@ const toProvider = (r: Row): Provider => ({
   name: r.name as string,
   specialty: r.specialty as string,
   roomLabel: r.room_label as string,
-  defaultFee: (r.default_fee as number) ?? 0,
+  defaultFee: Number(r.default_fee ?? 0),
 });
 
 const toMedication = (r: Row): Medication => ({
@@ -68,10 +68,10 @@ const toAppointment = (r: Row): Appointment => ({
   patientId: r.patient_id as string,
   providerId: r.provider_id as string,
   start: r.start as string,
-  durationMinutes: r.duration_minutes as number,
+  durationMinutes: Number(r.duration_minutes),
   reason: r.reason as string,
   status: r.status as Appointment["status"],
-  price: (r.price as number) ?? 0,
+  price: Number(r.price ?? 0),
   actualStart: (r.actual_start as string) ?? undefined,
   actualEnd: (r.actual_end as string) ?? undefined,
   createdVia: r.created_via as Appointment["createdVia"],
@@ -81,7 +81,7 @@ const toSlot = (r: Row): Slot => ({
   id: r.id as string,
   providerId: r.provider_id as string,
   start: r.start as string,
-  durationMinutes: r.duration_minutes as number,
+  durationMinutes: Number(r.duration_minutes),
   taken: Boolean(r.taken),
 });
 
@@ -91,7 +91,7 @@ const toInvoice = (r: Row): Invoice => ({
   patientId: r.patient_id as string,
   date: r.date as string,
   concept: r.concept as string,
-  amount: r.amount as number,
+  amount: Number(r.amount),
   status: r.status as Invoice["status"],
 });
 
@@ -118,12 +118,13 @@ const toOrg = (r: Row): Organization => ({
   phone: r.phone as string,
 });
 
-export function listOrganizations(): Organization[] {
-  return (getDb().prepare("SELECT * FROM organizations ORDER BY name").all() as Row[]).map(toOrg);
+export async function listOrganizations(): Promise<Organization[]> {
+  const rows = (await getSql()`SELECT * FROM organizations ORDER BY name`) as unknown as Row[];
+  return rows.map(toOrg);
 }
 
-export function getOrganization(id: string): Organization | undefined {
-  const r = getDb().prepare("SELECT * FROM organizations WHERE id = ?").get(id) as Row | undefined;
+export async function getOrganization(id: string): Promise<Organization | undefined> {
+  const [r] = (await getSql()`SELECT * FROM organizations WHERE id = ${id}`) as unknown as Row[];
   return r ? toOrg(r) : undefined;
 }
 
@@ -135,37 +136,29 @@ function slugify(s: string): string {
   return normName(s).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "org";
 }
 
-export function createOrganization(input: {
+export async function createOrganization(input: {
   name: string;
   address?: string;
   city?: string;
   phone?: string;
   hours?: string;
-}): Organization {
-  const db = getDb();
+}): Promise<Organization> {
+  const sql = getSql();
   let slug = slugify(input.name);
-  if (db.prepare("SELECT 1 FROM organizations WHERE slug = ?").get(slug)) slug = `${slug}-${uid("").slice(1, 5)}`;
+  const [taken] = (await sql`SELECT 1 FROM organizations WHERE slug = ${slug}`) as unknown as Row[];
+  if (taken) slug = `${slug}-${uid("").slice(1, 5)}`;
   const id = uid("org");
-  db.prepare(
-    "INSERT INTO organizations (id, name, slug, address, city, hours, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(
-    id,
-    input.name.trim(),
-    slug,
-    input.address?.trim() ?? "",
-    input.city?.trim() ?? "",
-    input.hours?.trim() || "Lunes a viernes de 8 a 18 h",
-    input.phone?.trim() ?? "",
-    new Date().toISOString(),
-  );
-  return getOrganization(id)!;
+  await sql`
+    INSERT INTO organizations (id, name, slug, address, city, hours, phone, created_at)
+    VALUES (${id}, ${input.name.trim()}, ${slug}, ${input.address?.trim() ?? ""}, ${input.city?.trim() ?? ""},
+            ${input.hours?.trim() || "Lunes a viernes de 8 a 18 h"}, ${input.phone?.trim() ?? ""}, ${new Date().toISOString()})`;
+  return (await getOrganization(id))!;
 }
 
-export function organizationNameTaken(name: string): boolean {
+export async function organizationNameTaken(name: string): Promise<boolean> {
   const t = normName(name);
-  return (getDb().prepare("SELECT name FROM organizations").all() as Row[]).some(
-    (r) => normName(r.name as string) === t,
-  );
+  const rows = (await getSql()`SELECT name FROM organizations`) as unknown as Row[];
+  return rows.some((r) => normName(r.name as string) === t);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +169,8 @@ const toUser = (r: Row): User => ({
   id: r.id as string,
   name: r.name as string,
   email: (r.email as string) ?? "",
+  dni: (r.dni as string) ?? "",
+  phone: (r.phone as string) ?? "",
   role: r.role as Role,
   patientId: (r.patient_id as string) ?? undefined,
 });
@@ -189,19 +184,15 @@ export interface Membership {
   canAdmin: boolean;
 }
 
-export function membershipsForUser(userId: string): Membership[] {
-  return (
-    getDb()
-      .prepare(
-        `SELECT m.organization_id, o.name AS org_name, m.role, m.provider_id, m.can_admin, p.specialty
-         FROM memberships m
-         JOIN organizations o ON o.id = m.organization_id
-         LEFT JOIN providers p ON p.id = m.provider_id
-         WHERE m.user_id = ?
-         ORDER BY o.name`,
-      )
-      .all(userId) as Row[]
-  ).map((r) => ({
+export async function membershipsForUser(userId: string): Promise<Membership[]> {
+  const rows = (await getSql()`
+    SELECT m.organization_id, o.name AS org_name, m.role, m.provider_id, m.can_admin, p.specialty
+    FROM memberships m
+    JOIN organizations o ON o.id = m.organization_id
+    LEFT JOIN providers p ON p.id = m.provider_id
+    WHERE m.user_id = ${userId}
+    ORDER BY o.name`) as unknown as Row[];
+  return rows.map((r) => ({
     organizationId: r.organization_id as string,
     organizationName: r.org_name as string,
     role: r.role as StaffRole,
@@ -212,111 +203,248 @@ export function membershipsForUser(userId: string): Membership[] {
   }));
 }
 
-export function patientOrgs(patientId: string): OrgRef[] {
-  return (
-    getDb()
-      .prepare(
-        `SELECT o.id, o.name FROM patient_organizations po
-         JOIN organizations o ON o.id = po.organization_id
-         WHERE po.patient_id = ? ORDER BY o.name`,
-      )
-      .all(patientId) as Row[]
-  ).map((r) => ({ id: r.id as string, name: r.name as string }));
+export async function patientOrgs(patientId: string): Promise<OrgRef[]> {
+  const rows = (await getSql()`
+    SELECT o.id, o.name FROM patient_organizations po
+    JOIN organizations o ON o.id = po.organization_id
+    WHERE po.patient_id = ${patientId} ORDER BY o.name`) as unknown as Row[];
+  return rows.map((r) => ({ id: r.id as string, name: r.name as string }));
 }
 
-export function joinPatientOrg(patientId: string, organizationId: string): void {
-  getDb()
-    .prepare(
-      "INSERT OR IGNORE INTO patient_organizations (patient_id, organization_id, joined_at) VALUES (?, ?, ?)",
-    )
-    .run(patientId, organizationId, new Date().toISOString());
+export async function joinPatientOrg(patientId: string, organizationId: string): Promise<void> {
+  await getSql()`
+    INSERT INTO patient_organizations (patient_id, organization_id, joined_at)
+    VALUES (${patientId}, ${organizationId}, ${new Date().toISOString()})
+    ON CONFLICT DO NOTHING`;
 }
 
 export const normEmail = (s: string): string => s.trim().toLowerCase();
 
-export function getUserByName(name: string): (User & { pinHash: string; pinSalt: string }) | undefined {
+/** Digits only, trailing 8 — tolerant of +54 / 0 / 15 / area-code variations. */
+export const normPhone = (s: string): string => s.replace(/\D/g, "").slice(-8);
+
+/** The portal login bound to a patient record, if one has been claimed. */
+export async function getUserByPatientId(patientId: string): Promise<User | undefined> {
+  const [r] = (await getSql()`SELECT * FROM users WHERE patient_id = ${patientId}`) as unknown as Row[];
+  return r ? toUser(r) : undefined;
+}
+
+export async function getUserByName(
+  name: string,
+): Promise<(User & { pinHash: string; pinSalt: string }) | undefined> {
   const target = normName(name);
-  const r = (getDb().prepare("SELECT * FROM users").all() as Row[]).find(
-    (row) => normName(row.name as string) === target,
-  );
+  const rows = (await getSql()`SELECT * FROM users`) as unknown as Row[];
+  const r = rows.find((row) => normName(row.name as string) === target);
   if (!r) return undefined;
   return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
 }
 
 /** Primary login lookup — email is the identifier for every role. */
-export function getUserByEmail(email: string): (User & { pinHash: string; pinSalt: string }) | undefined {
+export async function getUserByEmail(
+  email: string,
+): Promise<(User & { pinHash: string; pinSalt: string }) | undefined> {
   const target = normEmail(email);
   if (!target) return undefined;
-  const r = (getDb().prepare("SELECT * FROM users").all() as Row[]).find(
-    (row) => normEmail((row.email as string) ?? "") === target,
-  );
+  const rows = (await getSql()`SELECT * FROM users`) as unknown as Row[];
+  const r = rows.find((row) => normEmail((row.email as string) ?? "") === target);
   if (!r) return undefined;
   return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
 }
 
-export function getUser(id: string): User | undefined {
-  const r = getDb().prepare("SELECT * FROM users WHERE id = ?").get(id) as Row | undefined;
+export async function getUser(id: string): Promise<User | undefined> {
+  const [r] = (await getSql()`SELECT * FROM users WHERE id = ${id}`) as unknown as Row[];
   return r ? toUser(r) : undefined;
 }
 
-export function userNameTaken(name: string): boolean {
+export async function userNameTaken(name: string): Promise<boolean> {
   const t = normName(name);
-  return (getDb().prepare("SELECT name FROM users").all() as Row[]).some(
-    (r) => normName(r.name as string) === t,
-  );
+  const rows = (await getSql()`SELECT name FROM users`) as unknown as Row[];
+  return rows.some((r) => normName(r.name as string) === t);
 }
 
-export function userEmailTaken(email: string): boolean {
+export async function userEmailTaken(email: string): Promise<boolean> {
   const t = normEmail(email);
-  return (getDb().prepare("SELECT email FROM users").all() as Row[]).some(
-    (r) => normEmail((r.email as string) ?? "") === t,
-  );
+  const rows = (await getSql()`SELECT email FROM users`) as unknown as Row[];
+  return rows.some((r) => normEmail((r.email as string) ?? "") === t);
 }
 
-export function createUser(args: {
+export async function createUser(args: {
   name: string;
   email: string;
   role: Role;
+  /** "" leaves the account without a usable PIN — the person sets it via recovery. */
   pinHash: string;
   pinSalt: string;
+  dni?: string;
+  phone?: string;
   patientId?: string;
-}): User {
+}): Promise<User> {
   const id = uid("u");
   const email = normEmail(args.email);
-  getDb()
-    .prepare(
-      "INSERT INTO users (id, name, email, role, pin_hash, pin_salt, patient_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )
-    .run(id, args.name.trim(), email, args.role, args.pinHash, args.pinSalt, args.patientId ?? null);
-  return { id, name: args.name.trim(), email, role: args.role, patientId: args.patientId };
+  const dni = (args.dni ?? "").trim();
+  const phone = (args.phone ?? "").trim();
+  await getSql()`
+    INSERT INTO users (id, name, email, dni, phone, role, pin_hash, pin_salt, patient_id)
+    VALUES (${id}, ${args.name.trim()}, ${email}, ${dni}, ${phone}, ${args.role}, ${args.pinHash}, ${args.pinSalt}, ${args.patientId ?? null})`;
+  return { id, name: args.name.trim(), email, dni, phone, role: args.role, patientId: args.patientId };
 }
 
-export function addMembership(args: {
+const bareDni = (s: string) => s.replace(/\D/g, "");
+
+/** True when the account has a PIN set (recovery flow fills it in the first time). */
+export const hasUsablePin = (u: { pinHash?: string } | undefined): boolean => !!u?.pinHash;
+
+/** Any login (any role) whose DNI matches, plus its PIN material. */
+export async function getUserByDni(
+  dni: string,
+): Promise<(User & { pinHash: string; pinSalt: string }) | undefined> {
+  const target = bareDni(dni);
+  if (!target) return undefined;
+  const sql = getSql();
+  const rows = (await sql`SELECT * FROM users`) as unknown as Row[];
+  const r = rows.find((row) => bareDni((row.dni as string) ?? "") === target);
+  if (r) return { ...toUser(r), pinHash: r.pin_hash as string, pinSalt: r.pin_salt as string };
+  // Fallback for patient logins created before users.dni existed.
+  const p = await getPatientByDni(dni);
+  if (!p) return undefined;
+  const [pr] = (await sql`SELECT * FROM users WHERE patient_id = ${p.id}`) as unknown as Row[];
+  return pr ? { ...toUser(pr), pinHash: pr.pin_hash as string, pinSalt: pr.pin_salt as string } : undefined;
+}
+
+/**
+ * Ensure the patient behind `patientId` has a portal login. No-op if one exists.
+ * The account starts without a PIN — the patient sets it through recovery using
+ * the email / phone the clinic loaded.
+ */
+export async function ensurePatientLogin(args: {
+  patientId: string;
+  name: string;
+  email: string;
+  dni: string;
+  phone: string;
+}): Promise<User> {
+  const existing = await getUserByPatientId(args.patientId);
+  if (existing) return existing;
+  return createUser({
+    name: args.name,
+    email: args.email,
+    role: "paciente",
+    pinHash: "",
+    pinSalt: "",
+    dni: args.dni,
+    phone: args.phone,
+    patientId: args.patientId,
+  });
+}
+
+export async function updateUserPin(userId: string, pin: { hash: string; salt: string }): Promise<void> {
+  await getSql()`UPDATE users SET pin_hash = ${pin.hash}, pin_salt = ${pin.salt} WHERE id = ${userId}`;
+}
+
+/** Resolve a login (any role) from an email or a DNI. */
+export async function findLogin(args: { email?: string; dni?: string }): Promise<User | undefined> {
+  const raw = (args.email ?? args.dni ?? "").trim();
+  if (!raw) return undefined;
+  const hit = raw.includes("@") ? await getUserByEmail(raw) : await getUserByDni(raw);
+  if (!hit) return undefined;
+  return { id: hit.id, name: hit.name, email: hit.email, dni: hit.dni, phone: hit.phone, role: hit.role, patientId: hit.patientId };
+}
+
+// ---------------------------------------------------------------------------
+// One-time PIN-recovery codes
+// ---------------------------------------------------------------------------
+
+export type PinResetCode = {
+  id: string;
+  userId: string;
+  codeHash: string;
+  codeSalt: string;
+  channel: string;
+  sentTo: string;
+  attempts: number;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+};
+
+const toPinResetCode = (r: Row): PinResetCode => ({
+  id: r.id as string,
+  userId: r.user_id as string,
+  codeHash: r.code_hash as string,
+  codeSalt: r.code_salt as string,
+  channel: r.channel as string,
+  sentTo: r.sent_to as string,
+  attempts: Number(r.attempts),
+  createdAt: r.created_at as string,
+  expiresAt: r.expires_at as string,
+  consumedAt: (r.consumed_at as string) ?? null,
+});
+
+/** Invalidates any earlier outstanding code for the user, then stores the new one. */
+export async function createPinResetCode(args: {
+  userId: string;
+  codeHash: string;
+  codeSalt: string;
+  channel: string;
+  sentTo: string;
+  ttlMinutes: number;
+}): Promise<PinResetCode> {
+  const sql = getSql();
+  const now = new Date();
+  await sql`UPDATE pin_reset_codes SET consumed_at = ${now.toISOString()} WHERE user_id = ${args.userId} AND consumed_at IS NULL`;
+  const id = uid("prc");
+  const expires = new Date(now.getTime() + args.ttlMinutes * 60_000);
+  await sql`
+    INSERT INTO pin_reset_codes (id, user_id, code_hash, code_salt, channel, sent_to, attempts, created_at, expires_at)
+    VALUES (${id}, ${args.userId}, ${args.codeHash}, ${args.codeSalt}, ${args.channel}, ${args.sentTo}, 0, ${now.toISOString()}, ${expires.toISOString()})`;
+  const [r] = (await sql`SELECT * FROM pin_reset_codes WHERE id = ${id}`) as unknown as Row[];
+  return toPinResetCode(r);
+}
+
+/** The user's most recent still-valid (unconsumed, unexpired) code, if any. */
+export async function activePinResetCode(userId: string): Promise<PinResetCode | undefined> {
+  const [r] = (await getSql()`
+    SELECT * FROM pin_reset_codes
+    WHERE user_id = ${userId} AND consumed_at IS NULL AND expires_at > ${new Date().toISOString()}
+    ORDER BY created_at DESC LIMIT 1`) as unknown as Row[];
+  return r ? toPinResetCode(r) : undefined;
+}
+
+export async function bumpPinResetAttempts(id: string): Promise<number> {
+  const [r] = (await getSql()`
+    UPDATE pin_reset_codes SET attempts = attempts + 1 WHERE id = ${id} RETURNING attempts`) as unknown as Row[];
+  return Number(r?.attempts ?? 0);
+}
+
+export async function consumePinResetCode(id: string): Promise<void> {
+  await getSql()`UPDATE pin_reset_codes SET consumed_at = ${new Date().toISOString()} WHERE id = ${id}`;
+}
+
+export async function addMembership(args: {
   userId: string;
   organizationId: string;
   role: StaffRole;
   providerId?: string;
   canAdmin?: boolean;
-}): void {
-  getDb()
-    .prepare(
-      "INSERT OR REPLACE INTO memberships (user_id, organization_id, role, provider_id, can_admin) VALUES (?, ?, ?, ?, ?)",
-    )
-    .run(args.userId, args.organizationId, args.role, args.providerId ?? null, args.canAdmin ? 1 : 0);
+}): Promise<void> {
+  await getSql()`
+    INSERT INTO memberships (user_id, organization_id, role, provider_id, can_admin)
+    VALUES (${args.userId}, ${args.organizationId}, ${args.role}, ${args.providerId ?? null}, ${args.canAdmin ? 1 : 0})
+    ON CONFLICT (user_id, organization_id)
+    DO UPDATE SET role = EXCLUDED.role, provider_id = EXCLUDED.provider_id, can_admin = EXCLUDED.can_admin`;
 }
 
 // ---------------------------------------------------------------------------
 // Providers (per org)
 // ---------------------------------------------------------------------------
 
-export function listProviders(orgId: string): Provider[] {
-  return (
-    getDb().prepare("SELECT * FROM providers WHERE organization_id = ? ORDER BY name").all(orgId) as Row[]
-  ).map(toProvider);
+export async function listProviders(orgId: string): Promise<Provider[]> {
+  const rows = (await getSql()`SELECT * FROM providers WHERE organization_id = ${orgId} ORDER BY name`) as unknown as Row[];
+  return rows.map(toProvider);
 }
 
-export function getProvider(id: string): Provider | undefined {
-  const r = getDb().prepare("SELECT * FROM providers WHERE id = ?").get(id) as Row | undefined;
+export async function getProvider(id: string): Promise<Provider | undefined> {
+  const [r] = (await getSql()`SELECT * FROM providers WHERE id = ${id}`) as unknown as Row[];
   return r ? toProvider(r) : undefined;
 }
 
@@ -329,10 +457,9 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
   lateChangePolicy: "direct",
 };
 
-export function getProviderSettings(providerId: string): ProviderSettings {
-  const r = getDb()
-    .prepare("SELECT who_can_change, late_change_policy FROM provider_settings WHERE provider_id = ?")
-    .get(providerId) as Row | undefined;
+export async function getProviderSettings(providerId: string): Promise<ProviderSettings> {
+  const [r] = (await getSql()`
+    SELECT who_can_change, late_change_policy FROM provider_settings WHERE provider_id = ${providerId}`) as unknown as Row[];
   if (!r) return { ...DEFAULT_PROVIDER_SETTINGS };
   return {
     whoCanChange: (r.who_can_change as ProviderSettings["whoCanChange"]) ?? "anyone",
@@ -340,15 +467,16 @@ export function getProviderSettings(providerId: string): ProviderSettings {
   };
 }
 
-export function setProviderSettings(providerId: string, patch: Partial<ProviderSettings>): ProviderSettings {
-  const next = { ...getProviderSettings(providerId), ...patch };
-  getDb()
-    .prepare(
-      `INSERT INTO provider_settings (provider_id, who_can_change, late_change_policy)
-       VALUES (@id, @who, @late)
-       ON CONFLICT(provider_id) DO UPDATE SET who_can_change = @who, late_change_policy = @late`,
-    )
-    .run({ id: providerId, who: next.whoCanChange, late: next.lateChangePolicy });
+export async function setProviderSettings(
+  providerId: string,
+  patch: Partial<ProviderSettings>,
+): Promise<ProviderSettings> {
+  const next = { ...(await getProviderSettings(providerId)), ...patch };
+  await getSql()`
+    INSERT INTO provider_settings (provider_id, who_can_change, late_change_policy)
+    VALUES (${providerId}, ${next.whoCanChange}, ${next.lateChangePolicy})
+    ON CONFLICT (provider_id)
+    DO UPDATE SET who_can_change = EXCLUDED.who_can_change, late_change_policy = EXCLUDED.late_change_policy`;
   return next;
 }
 
@@ -372,7 +500,7 @@ const toChangeRequest = (r: Row): AppointmentChangeRequest => ({
   decidedAt: (r.decided_at as string) ?? undefined,
 });
 
-export function createChangeRequest(args: {
+export async function createChangeRequest(args: {
   organizationId: string;
   appointmentId: string;
   providerId: string;
@@ -381,138 +509,134 @@ export function createChangeRequest(args: {
   newSlotId?: string;
   reason?: string;
   requestedBy: string;
-}): AppointmentChangeRequest {
+}): Promise<AppointmentChangeRequest> {
   const id = uid("chg");
-  getDb()
-    .prepare(
-      `INSERT INTO appointment_change_requests
-        (id, organization_id, appointment_id, provider_id, patient_id, kind, new_slot_id, reason, requested_by, created_at, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
-    )
-    .run(
-      id,
-      args.organizationId,
-      args.appointmentId,
-      args.providerId,
-      args.patientId,
-      args.kind,
-      args.newSlotId ?? null,
-      args.reason ?? null,
-      args.requestedBy,
-      new Date().toISOString(),
-    );
-  return getChangeRequest(id)!;
+  await getSql()`
+    INSERT INTO appointment_change_requests
+      (id, organization_id, appointment_id, provider_id, patient_id, kind, new_slot_id, reason, requested_by, created_at, status)
+    VALUES (${id}, ${args.organizationId}, ${args.appointmentId}, ${args.providerId}, ${args.patientId}, ${args.kind},
+            ${args.newSlotId ?? null}, ${args.reason ?? null}, ${args.requestedBy}, ${new Date().toISOString()}, 'pending')`;
+  return (await getChangeRequest(id))!;
 }
 
-export function getChangeRequest(id: string): AppointmentChangeRequest | undefined {
-  const r = getDb().prepare("SELECT * FROM appointment_change_requests WHERE id = ?").get(id) as Row | undefined;
+export async function getChangeRequest(id: string): Promise<AppointmentChangeRequest | undefined> {
+  const [r] = (await getSql()`SELECT * FROM appointment_change_requests WHERE id = ${id}`) as unknown as Row[];
   return r ? toChangeRequest(r) : undefined;
 }
 
-export function listChangeRequests(opts: {
-  organizationId?: string;
-  providerId?: string;
-  patientId?: string;
-  status?: ChangeRequestStatus;
-} = {}): AppointmentChangeRequest[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM appointment_change_requests
-       WHERE (@org IS NULL OR organization_id = @org)
-         AND (@provider IS NULL OR provider_id = @provider)
-         AND (@patient IS NULL OR patient_id = @patient)
-         AND (@status IS NULL OR status = @status)
-       ORDER BY created_at DESC`,
-    )
-    .all({
-      org: opts.organizationId ?? null,
-      provider: opts.providerId ?? null,
-      patient: opts.patientId ?? null,
-      status: opts.status ?? null,
-    }) as Row[];
+export async function listChangeRequests(
+  opts: {
+    organizationId?: string;
+    providerId?: string;
+    patientId?: string;
+    status?: ChangeRequestStatus;
+  } = {},
+): Promise<AppointmentChangeRequest[]> {
+  const sql = getSql();
+  const rows = (await sql`
+    SELECT * FROM appointment_change_requests
+    WHERE (${opts.organizationId ?? null}::text IS NULL OR organization_id = ${opts.organizationId ?? null})
+      AND (${opts.providerId ?? null}::text IS NULL OR provider_id = ${opts.providerId ?? null})
+      AND (${opts.patientId ?? null}::text IS NULL OR patient_id = ${opts.patientId ?? null})
+      AND (${opts.status ?? null}::text IS NULL OR status = ${opts.status ?? null})
+    ORDER BY created_at DESC`) as unknown as Row[];
   return rows.map(toChangeRequest);
 }
 
-export function decideChangeRequest(id: string, args: { status: "approved" | "rejected"; decidedBy: string }): void {
-  getDb()
-    .prepare(
-      "UPDATE appointment_change_requests SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
-    )
-    .run(args.status, args.decidedBy, new Date().toISOString(), id);
+export async function decideChangeRequest(
+  id: string,
+  args: { status: "approved" | "rejected"; decidedBy: string },
+): Promise<void> {
+  await getSql()`
+    UPDATE appointment_change_requests
+    SET status = ${args.status}, decided_by = ${args.decidedBy}, decided_at = ${new Date().toISOString()}
+    WHERE id = ${id}`;
 }
 
-export function providerNameTakenInOrg(orgId: string, name: string): boolean {
+export async function providerNameTakenInOrg(orgId: string, name: string): Promise<boolean> {
   const t = normName(name);
-  return (
-    getDb().prepare("SELECT name FROM providers WHERE organization_id = ?").all(orgId) as Row[]
-  ).some((r) => normName(r.name as string) === t);
+  const rows = (await getSql()`SELECT name FROM providers WHERE organization_id = ${orgId}`) as unknown as Row[];
+  return rows.some((r) => normName(r.name as string) === t);
 }
 
 /**
  * Creates a professional in an org: provider + login (if new) + membership + slots.
- * A person already registered (same email) is reused and just linked to this org
- * with a fresh agenda — their existing PIN stays.
+ * A person already registered (same DNI/email) is reused and just linked to this
+ * org with a fresh agenda — their existing PIN stays.
  */
-export function createProfessional(args: {
+export async function createProfessional(args: {
   organizationId: string;
   name: string;
   email: string;
+  dni: string;
+  phone?: string;
   specialty: string;
   roomLabel: string;
-  pinHash: string;
-  pinSalt: string;
+  pinHash?: string;
+  pinSalt?: string;
   canAdmin?: boolean;
-}): { provider: Provider; userId: string; reusedUser: boolean } {
-  const db = getDb();
+}): Promise<{ provider: Provider; userId: string; reusedUser: boolean }> {
+  const sql = getSql();
   const providerId = uid("prov");
-  const existingUser = getUserByEmail(args.email);
+  const existingUser = (await getUserByDni(args.dni)) ?? (await getUserByEmail(args.email));
   const userId = existingUser?.id ?? uid("u");
   const reusedUser = Boolean(existingUser);
 
-  const tx = db.transaction(() => {
-    db.prepare(
-      "INSERT INTO providers (id, organization_id, name, specialty, room_label, default_fee) VALUES (?, ?, ?, ?, ?, 0)",
-    ).run(providerId, args.organizationId, args.name.trim(), args.specialty.trim(), args.roomLabel.trim());
+  if (existingUser) {
+    const [mem] = (await sql`
+      SELECT provider_id FROM memberships
+      WHERE user_id = ${userId} AND organization_id = ${args.organizationId} AND role = 'medico'`) as unknown as Row[];
+    if (mem?.provider_id) {
+      return { provider: (await getProvider(mem.provider_id as string))!, userId, reusedUser: true };
+    }
+  }
 
-    const slot = db.prepare(
-      "INSERT INTO slots (id, organization_id, provider_id, start, duration_minutes, taken) VALUES (?, ?, ?, ?, 30, 0)",
-    );
-    for (const s of generateSlotRows(providerId)) slot.run(s.id, args.organizationId, s.providerId, s.start);
+  await sql.begin(async (tx) => {
+    await tx`
+      INSERT INTO providers (id, organization_id, name, specialty, room_label, default_fee)
+      VALUES (${providerId}, ${args.organizationId}, ${args.name.trim()}, ${args.specialty.trim()}, ${args.roomLabel.trim()}, 0)`;
+
+    const slotRows = generateSlotRows(providerId).map((s) => ({
+      id: s.id, organization_id: args.organizationId, provider_id: s.providerId,
+      start: s.start, duration_minutes: 30, taken: 0,
+    }));
+    await tx`INSERT INTO slots ${tx(slotRows)}`;
 
     if (!existingUser) {
-      db.prepare(
-        "INSERT INTO users (id, name, email, role, pin_hash, pin_salt) VALUES (?, ?, ?, 'medico', ?, ?)",
-      ).run(userId, args.name.trim(), normEmail(args.email), args.pinHash, args.pinSalt);
+      await tx`
+        INSERT INTO users (id, name, email, dni, phone, role, pin_hash, pin_salt)
+        VALUES (${userId}, ${args.name.trim()}, ${normEmail(args.email)}, ${(args.dni ?? "").trim()},
+                ${(args.phone ?? "").trim()}, 'medico', ${args.pinHash ?? ""}, ${args.pinSalt ?? ""})`;
     }
-    db.prepare(
-      "INSERT OR REPLACE INTO memberships (user_id, organization_id, role, provider_id, can_admin) VALUES (?, ?, 'medico', ?, ?)",
-    ).run(userId, args.organizationId, providerId, args.canAdmin ? 1 : 0);
+    await tx`
+      INSERT INTO memberships (user_id, organization_id, role, provider_id, can_admin)
+      VALUES (${userId}, ${args.organizationId}, 'medico', ${providerId}, ${args.canAdmin ? 1 : 0})
+      ON CONFLICT (user_id, organization_id)
+      DO UPDATE SET role = 'medico', provider_id = EXCLUDED.provider_id, can_admin = EXCLUDED.can_admin`;
   });
-  tx();
-  return { provider: getProvider(providerId)!, userId, reusedUser };
+
+  return { provider: (await getProvider(providerId))!, userId, reusedUser };
 }
 
 // ---------------------------------------------------------------------------
 // Patients (global ficha)
 // ---------------------------------------------------------------------------
 
-function medsFor(patientId: string): Medication[] {
-  return (
-    getDb().prepare("SELECT * FROM medications WHERE patient_id = ? ORDER BY name").all(patientId) as Row[]
-  ).map(toMedication);
+async function medsFor(patientId: string): Promise<Medication[]> {
+  const rows = (await getSql()`SELECT * FROM medications WHERE patient_id = ${patientId} ORDER BY name`) as unknown as Row[];
+  return rows.map(toMedication);
 }
 
-export function getPatient(id: string): Patient | undefined {
-  const r = getDb().prepare("SELECT * FROM patients WHERE id = ?").get(id) as Row | undefined;
-  return r ? toPatient(r, medsFor(id)) : undefined;
+export async function getPatient(id: string): Promise<Patient | undefined> {
+  const [r] = (await getSql()`SELECT * FROM patients WHERE id = ${id}`) as unknown as Row[];
+  return r ? toPatient(r, await medsFor(id)) : undefined;
 }
 
-export function getPatientByDni(dni: string): Patient | undefined {
+export async function getPatientByDni(dni: string): Promise<Patient | undefined> {
   const bare = dni.replace(/\D/g, "");
-  const r = getDb()
-    .prepare("SELECT * FROM patients WHERE replace(replace(dni,'.',''),' ','') = ?")
-    .get(bare) as Row | undefined;
-  return r ? toPatient(r, medsFor(r.id as string)) : undefined;
+  const [r] = (await getSql()`
+    SELECT * FROM patients WHERE replace(replace(dni, '.', ''), ' ', '') = ${bare}`) as unknown as Row[];
+  return r ? toPatient(r, await medsFor(r.id as string)) : undefined;
 }
 
 export interface NewPatientInput {
@@ -525,24 +649,13 @@ export interface NewPatientInput {
   notes?: string;
 }
 
-export function createPatient(input: NewPatientInput): Patient {
+export async function createPatient(input: NewPatientInput): Promise<Patient> {
   const id = uid("pat");
-  getDb()
-    .prepare(
-      `INSERT INTO patients (id, full_name, dni, date_of_birth, phone, email, coverage, allergies, active_conditions, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', ?)`,
-    )
-    .run(
-      id,
-      input.fullName.trim(),
-      input.dni.trim(),
-      input.dateOfBirth.trim(),
-      input.phone?.trim() ?? "",
-      input.email?.trim() ?? "",
-      input.coverage.trim(),
-      input.notes?.trim() ?? null,
-    );
-  return getPatient(id)!;
+  await getSql()`
+    INSERT INTO patients (id, full_name, dni, date_of_birth, phone, email, coverage, allergies, active_conditions, notes)
+    VALUES (${id}, ${input.fullName.trim()}, ${input.dni.trim()}, ${input.dateOfBirth.trim()},
+            ${input.phone?.trim() ?? ""}, ${input.email?.trim() ?? ""}, ${input.coverage.trim()}, '[]', '[]', ${input.notes?.trim() ?? null})`;
+  return (await getPatient(id))!;
 }
 
 export interface PatientPatch {
@@ -558,7 +671,9 @@ export interface PatientPatch {
 }
 
 /** Manual edit of a patient's ficha (staff). Only the provided fields change. */
-export function updatePatient(id: string, patch: PatientPatch): Patient | undefined {
+export async function updatePatient(id: string, patch: PatientPatch): Promise<Patient | undefined> {
+  const sql = getSql();
+  const set: Record<string, unknown> = {};
   const cols: Record<string, string> = {
     fullName: "full_name",
     dni: "dni",
@@ -567,29 +682,19 @@ export function updatePatient(id: string, patch: PatientPatch): Patient | undefi
     email: "email",
     coverage: "coverage",
   };
-  const sets: string[] = [];
-  const vals: unknown[] = [];
   for (const [key, col] of Object.entries(cols)) {
     const v = (patch as Record<string, unknown>)[key];
-    if (typeof v === "string") {
-      sets.push(`${col} = ?`);
-      vals.push(v.trim());
-    }
+    if (typeof v === "string") set[col] = v.trim();
   }
-  if (patch.notes !== undefined) {
-    sets.push("notes = ?");
-    vals.push(patch.notes === null ? null : patch.notes.trim() || null);
-  }
+  if (patch.notes !== undefined) set.notes = patch.notes === null ? null : patch.notes.trim() || null;
   if (patch.allergies !== undefined) {
-    sets.push("allergies = ?");
-    vals.push(JSON.stringify(patch.allergies.map((s) => s.trim()).filter(Boolean)));
+    set.allergies = JSON.stringify(patch.allergies.map((s) => s.trim()).filter(Boolean));
   }
   if (patch.activeConditions !== undefined) {
-    sets.push("active_conditions = ?");
-    vals.push(JSON.stringify(patch.activeConditions.map((s) => s.trim()).filter(Boolean)));
+    set.active_conditions = JSON.stringify(patch.activeConditions.map((s) => s.trim()).filter(Boolean));
   }
-  if (sets.length > 0) {
-    getDb().prepare(`UPDATE patients SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+  if (Object.keys(set).length > 0) {
+    await sql`UPDATE patients SET ${sql(set)} WHERE id = ${id}`;
   }
   return getPatient(id);
 }
@@ -600,233 +705,201 @@ export function updatePatient(id: string, patch: PatientPatch): Patient | undefi
 
 export type MedicationRow = Medication & { id: string };
 
-export function listMedications(patientId: string): MedicationRow[] {
-  return (
-    getDb().prepare("SELECT * FROM medications WHERE patient_id = ? ORDER BY name").all(patientId) as Row[]
-  ).map((r) => ({ id: r.id as string, ...toMedication(r) }));
+export async function listMedications(patientId: string): Promise<MedicationRow[]> {
+  const rows = (await getSql()`SELECT * FROM medications WHERE patient_id = ${patientId} ORDER BY name`) as unknown as Row[];
+  return rows.map((r) => ({ id: r.id as string, ...toMedication(r) }));
 }
 
-export function getMedication(id: string): (MedicationRow & { patientId: string }) | undefined {
-  const r = getDb().prepare("SELECT * FROM medications WHERE id = ?").get(id) as Row | undefined;
+export async function getMedication(
+  id: string,
+): Promise<(MedicationRow & { patientId: string }) | undefined> {
+  const [r] = (await getSql()`SELECT * FROM medications WHERE id = ${id}`) as unknown as Row[];
   return r ? { id: r.id as string, patientId: r.patient_id as string, ...toMedication(r) } : undefined;
 }
 
-export function addMedication(args: {
+export async function addMedication(args: {
   patientId: string;
   name: string;
   dose: string;
   lastPrescribed?: string;
   chronic?: boolean;
-}): MedicationRow {
+}): Promise<MedicationRow> {
   const id = uid("med");
-  getDb()
-    .prepare(
-      "INSERT INTO medications (id, patient_id, name, dose, last_prescribed, chronic) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .run(
-      id,
-      args.patientId,
-      args.name.trim(),
-      args.dose.trim(),
-      args.lastPrescribed?.trim() || DEMO_TODAY,
-      args.chronic ? 1 : 0,
-    );
-  return getMedication(id)!;
+  await getSql()`
+    INSERT INTO medications (id, patient_id, name, dose, last_prescribed, chronic)
+    VALUES (${id}, ${args.patientId}, ${args.name.trim()}, ${args.dose.trim()},
+            ${args.lastPrescribed?.trim() || DEMO_TODAY}, ${args.chronic ? 1 : 0})`;
+  return (await getMedication(id))!;
 }
 
-export function updateMedication(
+export async function updateMedication(
   id: string,
   patch: { name?: string; dose?: string; lastPrescribed?: string; chronic?: boolean },
-): void {
-  const sets: string[] = [];
-  const vals: unknown[] = [];
-  if (patch.name !== undefined) {
-    sets.push("name = ?");
-    vals.push(patch.name.trim());
-  }
-  if (patch.dose !== undefined) {
-    sets.push("dose = ?");
-    vals.push(patch.dose.trim());
-  }
-  if (patch.lastPrescribed !== undefined) {
-    sets.push("last_prescribed = ?");
-    vals.push(patch.lastPrescribed.trim());
-  }
-  if (patch.chronic !== undefined) {
-    sets.push("chronic = ?");
-    vals.push(patch.chronic ? 1 : 0);
-  }
-  if (sets.length === 0) return;
-  getDb().prepare(`UPDATE medications SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+): Promise<void> {
+  const sql = getSql();
+  const set: Record<string, unknown> = {};
+  if (patch.name !== undefined) set.name = patch.name.trim();
+  if (patch.dose !== undefined) set.dose = patch.dose.trim();
+  if (patch.lastPrescribed !== undefined) set.last_prescribed = patch.lastPrescribed.trim();
+  if (patch.chronic !== undefined) set.chronic = patch.chronic ? 1 : 0;
+  if (Object.keys(set).length === 0) return;
+  await sql`UPDATE medications SET ${sql(set)} WHERE id = ${id}`;
 }
 
-export function removeMedication(id: string): void {
-  getDb().prepare("DELETE FROM medications WHERE id = ?").run(id);
+export async function removeMedication(id: string): Promise<void> {
+  await getSql()`DELETE FROM medications WHERE id = ${id}`;
 }
 
-/** Search patients that belong to a given org. */
 /**
  * Patients of an organization. With no `query` it returns everyone (ordered by
  * name); with a query it filters by name, DNI, email, phone or id — digits-only
  * on the query also match digits-only DNI / phone.
  */
-export function searchPatients(orgId: string, query: string): Patient[] {
+export async function searchPatients(orgId: string, query: string): Promise<Patient[]> {
   const q = query.trim().toLowerCase();
   const digits = q.replace(/\D/g, "");
-  const rows = getDb()
-    .prepare(
-      `SELECT p.* FROM patients p
-       JOIN patient_organizations po ON po.patient_id = p.id
-       WHERE po.organization_id = @org
-         AND ( @q = ''
-            OR lower(p.full_name) LIKE @like
-            OR lower(p.email) LIKE @like
-            OR lower(p.phone) LIKE @like
-            OR p.id = @exact
-            OR (@digits <> '' AND replace(replace(p.dni, '.', ''), ' ', '') LIKE @digitsLike)
-            OR (@digits <> '' AND replace(replace(replace(p.phone, '+', ''), '-', ''), ' ', '') LIKE @digitsLike) )
-       ORDER BY p.full_name`,
-    )
-    .all({
-      org: orgId,
-      q,
-      like: `%${q}%`,
-      digits,
-      digitsLike: `%${digits}%`,
-      exact: q,
-    }) as Row[];
-  return rows.map((r) => toPatient(r, medsFor(r.id as string)));
+  const like = `%${q}%`;
+  const digitsLike = `%${digits}%`;
+  const rows = (await getSql()`
+    SELECT p.* FROM patients p
+    JOIN patient_organizations po ON po.patient_id = p.id
+    WHERE po.organization_id = ${orgId}
+      AND ( ${q} = ''
+         OR lower(p.full_name) LIKE ${like}
+         OR lower(p.email) LIKE ${like}
+         OR lower(p.phone) LIKE ${like}
+         OR p.id = ${q}
+         OR (${digits} <> '' AND replace(replace(p.dni, '.', ''), ' ', '') LIKE ${digitsLike})
+         OR (${digits} <> '' AND replace(replace(replace(p.phone, '+', ''), '-', ''), ' ', '') LIKE ${digitsLike}) )
+    ORDER BY p.full_name`) as unknown as Row[];
+  return Promise.all(rows.map(async (r) => toPatient(r, await medsFor(r.id as string))));
 }
 
-export function patientInOrg(patientId: string, orgId: string): boolean {
-  return Boolean(
-    getDb()
-      .prepare("SELECT 1 FROM patient_organizations WHERE patient_id = ? AND organization_id = ?")
-      .get(patientId, orgId),
-  );
+export async function patientInOrg(patientId: string, orgId: string): Promise<boolean> {
+  const [r] = (await getSql()`
+    SELECT 1 FROM patient_organizations WHERE patient_id = ${patientId} AND organization_id = ${orgId}`) as unknown as Row[];
+  return Boolean(r);
 }
 
 // ---------------------------------------------------------------------------
 // Appointments
 // ---------------------------------------------------------------------------
 
-export function getAppointment(id: string): Appointment | undefined {
-  const r = getDb().prepare("SELECT * FROM appointments WHERE id = ?").get(id) as Row | undefined;
+export async function getAppointment(id: string): Promise<Appointment | undefined> {
+  const [r] = (await getSql()`SELECT * FROM appointments WHERE id = ${id}`) as unknown as Row[];
   return r ? toAppointment(r) : undefined;
 }
 
-export function getAppointmentsForPatient(patientId: string, orgIds?: string[]): Appointment[] {
-  const rows = getDb()
-    .prepare("SELECT * FROM appointments WHERE patient_id = ? ORDER BY start")
-    .all(patientId) as Row[];
+export async function getAppointmentsForPatient(
+  patientId: string,
+  orgIds?: string[],
+): Promise<Appointment[]> {
+  const rows = (await getSql()`SELECT * FROM appointments WHERE patient_id = ${patientId} ORDER BY start`) as unknown as Row[];
   const list = rows.map(toAppointment);
   return orgIds ? list.filter((a) => orgIds.includes(a.organizationId)) : list;
 }
 
-export function getUpcomingAppointments(patientId: string, orgIds?: string[]): Appointment[] {
-  return getAppointmentsForPatient(patientId, orgIds).filter(
+export async function getUpcomingAppointments(
+  patientId: string,
+  orgIds?: string[],
+): Promise<Appointment[]> {
+  return (await getAppointmentsForPatient(patientId, orgIds)).filter(
     (a) => a.status === "scheduled" && a.start >= TODAY,
   );
 }
 
 /** Agenda view for an org: scheduled + in-progress, optional provider/date filter. */
-export function listAppointments(
+export async function listAppointments(
   orgId: string,
   opts: { providerId?: string; date?: string } = {},
-): Appointment[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM appointments
-       WHERE organization_id = @org
-         AND status IN ('scheduled', 'in-progress')
-         AND (@providerId IS NULL OR provider_id = @providerId)
-         AND (@date IS NULL OR substr(start, 1, 10) = @date)
-       ORDER BY start`,
-    )
-    .all({ org: orgId, providerId: opts.providerId ?? null, date: opts.date ?? null }) as Row[];
+): Promise<Appointment[]> {
+  const rows = (await getSql()`
+    SELECT * FROM appointments
+    WHERE organization_id = ${orgId}
+      AND status IN ('scheduled', 'in-progress')
+      AND (${opts.providerId ?? null}::text IS NULL OR provider_id = ${opts.providerId ?? null})
+      AND (${opts.date ?? null}::text IS NULL OR substr(start, 1, 10) = ${opts.date ?? null})
+    ORDER BY start`) as unknown as Row[];
   return rows.map(toAppointment);
 }
 
-export function inProgressAppointment(providerId: string, date: string): Appointment | undefined {
-  const r = getDb()
-    .prepare(
-      "SELECT * FROM appointments WHERE provider_id = ? AND substr(start,1,10) = ? AND status = 'in-progress' LIMIT 1",
-    )
-    .get(providerId, date) as Row | undefined;
+export async function inProgressAppointment(
+  providerId: string,
+  date: string,
+): Promise<Appointment | undefined> {
+  const [r] = (await getSql()`
+    SELECT * FROM appointments
+    WHERE provider_id = ${providerId} AND substr(start, 1, 10) = ${date} AND status = 'in-progress' LIMIT 1`) as unknown as Row[];
   return r ? toAppointment(r) : undefined;
 }
 
-export function nextScheduledAppointment(providerId: string, date: string): Appointment | undefined {
-  const r = getDb()
-    .prepare(
-      "SELECT * FROM appointments WHERE provider_id = ? AND substr(start,1,10) = ? AND status = 'scheduled' ORDER BY start LIMIT 1",
-    )
-    .get(providerId, date) as Row | undefined;
+export async function nextScheduledAppointment(
+  providerId: string,
+  date: string,
+): Promise<Appointment | undefined> {
+  const [r] = (await getSql()`
+    SELECT * FROM appointments
+    WHERE provider_id = ${providerId} AND substr(start, 1, 10) = ${date} AND status = 'scheduled'
+    ORDER BY start LIMIT 1`) as unknown as Row[];
   return r ? toAppointment(r) : undefined;
 }
 
-export function providerAppointments(providerId: string): Appointment[] {
-  return (
-    getDb().prepare("SELECT * FROM appointments WHERE provider_id = ? ORDER BY start").all(providerId) as Row[]
-  ).map(toAppointment);
+export async function providerAppointments(providerId: string): Promise<Appointment[]> {
+  const rows = (await getSql()`SELECT * FROM appointments WHERE provider_id = ${providerId} ORDER BY start`) as unknown as Row[];
+  return rows.map(toAppointment);
 }
 
 // ---------------------------------------------------------------------------
 // Slots
 // ---------------------------------------------------------------------------
 
-export function listOpenSlots(orgId: string, opts: { providerId?: string; date?: string } = {}): Slot[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM slots
-       WHERE organization_id = @org AND taken = 0
-         AND (@providerId IS NULL OR provider_id = @providerId)
-         AND (@date IS NULL OR substr(start, 1, 10) = @date)
-       ORDER BY start`,
-    )
-    .all({ org: orgId, providerId: opts.providerId ?? null, date: opts.date ?? null }) as Row[];
+export async function listOpenSlots(
+  orgId: string,
+  opts: { providerId?: string; date?: string } = {},
+): Promise<Slot[]> {
+  const rows = (await getSql()`
+    SELECT * FROM slots
+    WHERE organization_id = ${orgId} AND taken = 0
+      AND (${opts.providerId ?? null}::text IS NULL OR provider_id = ${opts.providerId ?? null})
+      AND (${opts.date ?? null}::text IS NULL OR substr(start, 1, 10) = ${opts.date ?? null})
+    ORDER BY start`) as unknown as Row[];
   return rows.map(toSlot);
 }
 
-export function getSlot(id: string): Slot | undefined {
-  const r = getDb().prepare("SELECT * FROM slots WHERE id = ?").get(id) as Row | undefined;
+export async function getSlot(id: string): Promise<Slot | undefined> {
+  const [r] = (await getSql()`SELECT * FROM slots WHERE id = ${id}`) as unknown as Row[];
   return r ? toSlot(r) : undefined;
 }
 
-export function freeSlotCount(providerId: string, date: string): number {
-  return (
-    getDb()
-      .prepare("SELECT COUNT(*) AS n FROM slots WHERE provider_id = ? AND taken = 0 AND substr(start,1,10) = ?")
-      .get(providerId, date) as { n: number }
-  ).n;
+export async function freeSlotCount(providerId: string, date: string): Promise<number> {
+  const [r] = (await getSql()`
+    SELECT count(*)::int AS n FROM slots
+    WHERE provider_id = ${providerId} AND taken = 0 AND substr(start, 1, 10) = ${date}`) as unknown as Row[];
+  return Number(r?.n ?? 0);
 }
 
 // ---------------------------------------------------------------------------
 // Invoices / labs
 // ---------------------------------------------------------------------------
 
-export function getInvoicesForPatient(patientId: string, orgId?: string): Invoice[] {
+export async function getInvoicesForPatient(patientId: string, orgId?: string): Promise<Invoice[]> {
+  const sql = getSql();
   const rows = orgId
-    ? (getDb()
-        .prepare("SELECT * FROM invoices WHERE patient_id = ? AND organization_id = ? ORDER BY date")
-        .all(patientId, orgId) as Row[])
-    : (getDb().prepare("SELECT * FROM invoices WHERE patient_id = ? ORDER BY date").all(patientId) as Row[]);
+    ? ((await sql`SELECT * FROM invoices WHERE patient_id = ${patientId} AND organization_id = ${orgId} ORDER BY date`) as unknown as Row[])
+    : ((await sql`SELECT * FROM invoices WHERE patient_id = ${patientId} ORDER BY date`) as unknown as Row[]);
   return rows.map(toInvoice);
 }
 
-export function getInvoice(id: string): Invoice | undefined {
-  const r = getDb().prepare("SELECT * FROM invoices WHERE id = ?").get(id) as Row | undefined;
+export async function getInvoice(id: string): Promise<Invoice | undefined> {
+  const [r] = (await getSql()`SELECT * FROM invoices WHERE id = ${id}`) as unknown as Row[];
   return r ? toInvoice(r) : undefined;
 }
 
-export function getLabResultsForPatient(patientId: string, orgId?: string): LabResult[] {
+export async function getLabResultsForPatient(patientId: string, orgId?: string): Promise<LabResult[]> {
+  const sql = getSql();
   const rows = orgId
-    ? (getDb()
-        .prepare("SELECT * FROM lab_results WHERE patient_id = ? AND organization_id = ? ORDER BY date DESC")
-        .all(patientId, orgId) as Row[])
-    : (getDb()
-        .prepare("SELECT * FROM lab_results WHERE patient_id = ? ORDER BY date DESC")
-        .all(patientId) as Row[]);
+    ? ((await sql`SELECT * FROM lab_results WHERE patient_id = ${patientId} AND organization_id = ${orgId} ORDER BY date DESC`) as unknown as Row[])
+    : ((await sql`SELECT * FROM lab_results WHERE patient_id = ${patientId} ORDER BY date DESC`) as unknown as Row[]);
   return rows.map(toLab);
 }
 
@@ -834,136 +907,124 @@ export function getLabResultsForPatient(patientId: string, orgId?: string): LabR
 // Mutations
 // ---------------------------------------------------------------------------
 
-export function bookSlot(args: {
+export async function bookSlot(args: {
   organizationId: string;
   patientId: string;
   slotId: string;
   reason: string;
   createdVia?: Appointment["createdVia"];
-}): Appointment {
-  const db = getDb();
-  return db.transaction(() => {
-    const slot = getSlot(args.slotId);
+}): Promise<Appointment> {
+  const sql = getSql();
+  const id = uid("apt");
+  await sql.begin(async (tx) => {
+    const [slot] = (await tx`SELECT * FROM slots WHERE id = ${args.slotId} FOR UPDATE`) as unknown as Row[];
     if (!slot) throw new Error(`El horario ${args.slotId} no existe.`);
-    if (slot.taken) throw new Error(`El horario ${args.slotId} ya está ocupado.`);
-    db.prepare("UPDATE slots SET taken = 1 WHERE id = ?").run(args.slotId);
-    const id = uid("apt");
-    db.prepare(
-      `INSERT INTO appointments (id, organization_id, patient_id, provider_id, start, duration_minutes, reason, status, created_via)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)`,
-    ).run(
-      id,
-      args.organizationId,
-      args.patientId,
-      slot.providerId,
-      slot.start,
-      slot.durationMinutes,
-      args.reason,
-      args.createdVia ?? "agent",
-    );
-    return getAppointment(id)!;
-  })();
+    if (Boolean(slot.taken)) throw new Error(`El horario ${args.slotId} ya está ocupado.`);
+    await tx`UPDATE slots SET taken = 1 WHERE id = ${args.slotId}`;
+    await tx`
+      INSERT INTO appointments (id, organization_id, patient_id, provider_id, start, duration_minutes, reason, status, created_via)
+      VALUES (${id}, ${args.organizationId}, ${args.patientId}, ${slot.provider_id as string}, ${slot.start as string},
+              ${Number(slot.duration_minutes)}, ${args.reason}, 'scheduled', ${args.createdVia ?? "agent"})`;
+  });
+  return (await getAppointment(id))!;
 }
 
-export function cancelAppointmentById(id: string): Appointment {
-  const db = getDb();
-  const apt = getAppointment(id);
+export async function cancelAppointmentById(id: string): Promise<Appointment> {
+  const sql = getSql();
+  const apt = await getAppointment(id);
   if (!apt) throw new Error(`El turno ${id} no existe.`);
-  db.prepare("UPDATE appointments SET status = 'cancelled' WHERE id = ?").run(id);
-  db.prepare("UPDATE slots SET taken = 0 WHERE provider_id = ? AND start = ?").run(apt.providerId, apt.start);
-  return getAppointment(id)!;
+  await sql`UPDATE appointments SET status = 'cancelled' WHERE id = ${id}`;
+  await sql`UPDATE slots SET taken = 0 WHERE provider_id = ${apt.providerId} AND start = ${apt.start}`;
+  return (await getAppointment(id))!;
 }
 
-export function createPrescriptionRequest(args: {
+export async function createPrescriptionRequest(args: {
   organizationId: string;
   patientId: string;
   medication: string;
   decision: "approved" | "denied";
   decidedBy?: string;
   note?: string;
-}): PrescriptionRequest {
+}): Promise<PrescriptionRequest> {
   const id = uid("rx");
   const requestedAt = new Date().toISOString();
-  getDb()
-    .prepare(
-      `INSERT INTO prescription_requests (id, organization_id, patient_id, medication, requested_at, status, decided_by, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      id,
-      args.organizationId,
-      args.patientId,
-      args.medication,
-      requestedAt,
-      args.decision === "approved" ? "approved" : "denied",
-      args.decidedBy ?? null,
-      args.note ?? null,
-    );
+  const status = args.decision === "approved" ? "approved" : "denied";
+  await getSql()`
+    INSERT INTO prescription_requests (id, organization_id, patient_id, medication, requested_at, status, decided_by, note)
+    VALUES (${id}, ${args.organizationId}, ${args.patientId}, ${args.medication}, ${requestedAt}, ${status}, ${args.decidedBy ?? null}, ${args.note ?? null})`;
   return {
     id,
     patientId: args.patientId,
     medication: args.medication,
     requestedAt,
-    status: args.decision === "approved" ? "approved" : "denied",
+    status,
     decidedBy: args.decidedBy,
     note: args.note,
   };
 }
 
-export function recordPatientMessage(orgId: string, patientId: string, body: string): PatientMessage {
+export async function recordPatientMessage(
+  orgId: string,
+  patientId: string,
+  body: string,
+): Promise<PatientMessage> {
   const id = uid("msg");
   const sentAt = new Date().toISOString();
-  getDb()
-    .prepare("INSERT INTO patient_messages (id, organization_id, patient_id, body, sent_at) VALUES (?, ?, ?, ?, ?)")
-    .run(id, orgId, patientId, body, sentAt);
+  await getSql()`
+    INSERT INTO patient_messages (id, organization_id, patient_id, body, sent_at)
+    VALUES (${id}, ${orgId}, ${patientId}, ${body}, ${sentAt})`;
   return { id, patientId, body, sentAt };
 }
 
-export function refundInvoice(id: string): Invoice {
-  const inv = getInvoice(id);
+export async function refundInvoice(id: string): Promise<Invoice> {
+  const inv = await getInvoice(id);
   if (!inv) throw new Error(`La factura ${id} no existe.`);
-  getDb().prepare("UPDATE invoices SET status = 'refunded' WHERE id = ?").run(id);
-  return getInvoice(id)!;
+  await getSql()`UPDATE invoices SET status = 'refunded' WHERE id = ${id}`;
+  return (await getInvoice(id))!;
 }
 
 // ---------------------------------------------------------------------------
 // Pricing
 // ---------------------------------------------------------------------------
 
-export function listProviderPrices(providerId: string): PriceItem[] {
-  return (
-    getDb()
-      .prepare("SELECT id, label, amount FROM provider_prices WHERE provider_id = ? ORDER BY label")
-      .all(providerId) as Row[]
-  ).map((r) => ({ id: r.id as string, label: r.label as string, amount: r.amount as number }));
+export async function listProviderPrices(providerId: string): Promise<PriceItem[]> {
+  const rows = (await getSql()`
+    SELECT id, label, amount FROM provider_prices WHERE provider_id = ${providerId} ORDER BY label`) as unknown as Row[];
+  return rows.map((r) => ({ id: r.id as string, label: r.label as string, amount: Number(r.amount) }));
 }
 
-export function setProviderFee(providerId: string, amount: number): void {
-  getDb().prepare("UPDATE providers SET default_fee = ? WHERE id = ?").run(Math.round(amount), providerId);
+export async function setProviderFee(providerId: string, amount: number): Promise<void> {
+  await getSql()`UPDATE providers SET default_fee = ${Math.round(amount)} WHERE id = ${providerId}`;
 }
 
-export function addProviderPrice(orgId: string, providerId: string, label: string, amount: number): PriceItem {
+export async function addProviderPrice(
+  orgId: string,
+  providerId: string,
+  label: string,
+  amount: number,
+): Promise<PriceItem> {
   const id = uid("price");
-  getDb()
-    .prepare("INSERT INTO provider_prices (id, organization_id, provider_id, label, amount) VALUES (?, ?, ?, ?, ?)")
-    .run(id, orgId, providerId, label.trim(), Math.round(amount));
+  await getSql()`
+    INSERT INTO provider_prices (id, organization_id, provider_id, label, amount)
+    VALUES (${id}, ${orgId}, ${providerId}, ${label.trim()}, ${Math.round(amount)})`;
   return { id, label: label.trim(), amount: Math.round(amount) };
 }
 
-export function priceForReason(providerId: string, reason: string): number {
+export async function priceForReason(providerId: string, reason: string): Promise<number> {
   const r = reason.trim().toLowerCase();
-  const match = listProviderPrices(providerId).find(
+  const prices = await listProviderPrices(providerId);
+  const match = prices.find(
     (p) => r.includes(p.label.toLowerCase()) || p.label.toLowerCase().includes(r),
   );
-  return match ? match.amount : getProvider(providerId)?.defaultFee ?? 0;
+  return match ? match.amount : (await getProvider(providerId))?.defaultFee ?? 0;
 }
 
-export function setAppointmentStatus(id: string, status: Appointment["status"]): void {
-  getDb().prepare("UPDATE appointments SET status = ? WHERE id = ?").run(status, id);
+export async function setAppointmentStatus(id: string, status: Appointment["status"]): Promise<void> {
+  await getSql()`UPDATE appointments SET status = ${status} WHERE id = ${id}`;
 }
 
-export function setAppointmentPrice(id: string, price: number): void {
-  getDb().prepare("UPDATE appointments SET price = ? WHERE id = ?").run(Math.round(price), id);
+export async function setAppointmentPrice(id: string, price: number): Promise<void> {
+  await getSql()`UPDATE appointments SET price = ${Math.round(price)} WHERE id = ${id}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -988,34 +1049,42 @@ export interface DayReport {
   providers: ProviderDayReport[];
 }
 
-export function buildDayReport(orgId: string, date: string, providerId?: string): DayReport {
-  const providers = (providerId ? [getProvider(providerId)].filter(Boolean) : listProviders(orgId)) as Provider[];
-  const rows = getDb()
-    .prepare("SELECT * FROM appointments WHERE organization_id = ? AND substr(start, 1, 10) = ?")
-    .all(orgId, date) as Row[];
+export async function buildDayReport(
+  orgId: string,
+  date: string,
+  providerId?: string,
+): Promise<DayReport> {
+  const providers = providerId
+    ? ([await getProvider(providerId)].filter(Boolean) as Provider[])
+    : await listProviders(orgId);
+  const rows = (await getSql()`
+    SELECT * FROM appointments WHERE organization_id = ${orgId} AND substr(start, 1, 10) = ${date}`) as unknown as Row[];
   const appts = rows.map(toAppointment);
 
-  const perProvider: ProviderDayReport[] = providers.map((prov) => {
-    const mine = appts.filter((a) => a.providerId === prov.id);
-    const attended = mine.filter((a) => a.status === "completed");
-    return {
-      providerId: prov.id,
-      providerName: prov.name,
-      specialty: prov.specialty,
-      attended: attended
-        .sort((a, b) => a.start.localeCompare(b.start))
-        .map((a) => ({
-          patient: getPatient(a.patientId)?.fullName ?? a.patientId,
+  const perProvider: ProviderDayReport[] = await Promise.all(
+    providers.map(async (prov) => {
+      const mine = appts.filter((a) => a.providerId === prov.id);
+      const attended = mine.filter((a) => a.status === "completed").sort((a, b) => a.start.localeCompare(b.start));
+      const attendedRows = await Promise.all(
+        attended.map(async (a) => ({
+          patient: (await getPatient(a.patientId))?.fullName ?? a.patientId,
           reason: a.reason,
           time: a.start.slice(11, 16),
           price: a.price,
         })),
-      attendedCount: attended.length,
-      cancelledCount: mine.filter((a) => a.status === "cancelled").length,
-      stillScheduled: mine.filter((a) => a.status === "scheduled").length,
-      revenue: attended.reduce((s, a) => s + a.price, 0),
-    };
-  });
+      );
+      return {
+        providerId: prov.id,
+        providerName: prov.name,
+        specialty: prov.specialty,
+        attended: attendedRows,
+        attendedCount: attended.length,
+        cancelledCount: mine.filter((a) => a.status === "cancelled").length,
+        stillScheduled: mine.filter((a) => a.status === "scheduled").length,
+        revenue: attended.reduce((s, a) => s + a.price, 0),
+      };
+    }),
+  );
 
   return {
     date,
@@ -1025,29 +1094,27 @@ export function buildDayReport(orgId: string, date: string, providerId?: string)
   };
 }
 
-export function saveDailyReport(
+export async function saveDailyReport(
   orgId: string,
   date: string,
   providerId: string,
   generatedBy: string,
   payload: unknown,
-): void {
-  getDb()
-    .prepare(
-      `INSERT OR REPLACE INTO daily_reports (organization_id, date, provider_id, generated_at, generated_by, payload)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .run(orgId, date, providerId, new Date().toISOString(), generatedBy, JSON.stringify(payload));
+): Promise<void> {
+  await getSql()`
+    INSERT INTO daily_reports (organization_id, date, provider_id, generated_at, generated_by, payload)
+    VALUES (${orgId}, ${date}, ${providerId}, ${new Date().toISOString()}, ${generatedBy}, ${JSON.stringify(payload)})
+    ON CONFLICT (organization_id, date, provider_id)
+    DO UPDATE SET generated_at = EXCLUDED.generated_at, generated_by = EXCLUDED.generated_by, payload = EXCLUDED.payload`;
 }
 
-export function getSavedDailyReport(
+export async function getSavedDailyReport(
   orgId: string,
   date: string,
   providerId: string,
-): { generatedAt: string; generatedBy?: string; payload: unknown } | undefined {
-  const r = getDb()
-    .prepare("SELECT * FROM daily_reports WHERE organization_id = ? AND date = ? AND provider_id = ?")
-    .get(orgId, date, providerId) as Row | undefined;
+): Promise<{ generatedAt: string; generatedBy?: string; payload: unknown } | undefined> {
+  const [r] = (await getSql()`
+    SELECT * FROM daily_reports WHERE organization_id = ${orgId} AND date = ${date} AND provider_id = ${providerId}`) as unknown as Row[];
   if (!r) return undefined;
   return {
     generatedAt: r.generated_at as string,
@@ -1073,40 +1140,38 @@ function addMinutes(iso: string, min: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:00`;
 }
 
-export function isBirthday(patientId: string, date: string): boolean {
-  const p = getPatient(patientId);
+export async function isBirthday(patientId: string, date: string): Promise<boolean> {
+  const p = await getPatient(patientId);
   return Boolean(p && p.dateOfBirth.slice(5) === date.slice(5));
 }
 
-function initialClock(providerId: string, date: string): string {
-  const r = getDb()
-    .prepare(
-      `SELECT start FROM appointments
-       WHERE provider_id = ? AND substr(start,1,10) = ? AND status IN ('scheduled','in-progress')
-       ORDER BY start LIMIT 1`,
-    )
-    .get(providerId, date) as { start?: string } | undefined;
-  return r?.start ?? `${date}T09:00:00`;
+async function initialClock(providerId: string, date: string): Promise<string> {
+  const [r] = (await getSql()`
+    SELECT start FROM appointments
+    WHERE provider_id = ${providerId} AND substr(start, 1, 10) = ${date} AND status IN ('scheduled', 'in-progress')
+    ORDER BY start LIMIT 1`) as unknown as Row[];
+  return (r?.start as string) ?? `${date}T09:00:00`;
 }
 
-export function getClinicClock(providerId: string, date: string): string {
-  const r = getDb()
-    .prepare("SELECT clock FROM clinic_state WHERE date = ? AND provider_id = ?")
-    .get(date, providerId) as { clock?: string } | undefined;
-  if (r?.clock) return r.clock;
-  const c = initialClock(providerId, date);
-  const orgId = getProvider(providerId)?.organizationId ?? "";
-  getDb()
-    .prepare("INSERT OR REPLACE INTO clinic_state (organization_id, date, provider_id, clock) VALUES (?, ?, ?, ?)")
-    .run(orgId, date, providerId, c);
+export async function getClinicClock(providerId: string, date: string): Promise<string> {
+  const sql = getSql();
+  const [r] = (await sql`SELECT clock FROM clinic_state WHERE date = ${date} AND provider_id = ${providerId}`) as unknown as Row[];
+  if (r?.clock) return r.clock as string;
+  const c = await initialClock(providerId, date);
+  const orgId = (await getProvider(providerId))?.organizationId ?? "";
+  await sql`
+    INSERT INTO clinic_state (organization_id, date, provider_id, clock)
+    VALUES (${orgId}, ${date}, ${providerId}, ${c})
+    ON CONFLICT (date, provider_id) DO UPDATE SET clock = EXCLUDED.clock, organization_id = EXCLUDED.organization_id`;
   return c;
 }
 
-export function setClinicClock(providerId: string, date: string, iso: string): void {
-  const orgId = getProvider(providerId)?.organizationId ?? "";
-  getDb()
-    .prepare("INSERT OR REPLACE INTO clinic_state (organization_id, date, provider_id, clock) VALUES (?, ?, ?, ?)")
-    .run(orgId, date, providerId, iso);
+export async function setClinicClock(providerId: string, date: string, iso: string): Promise<void> {
+  const orgId = (await getProvider(providerId))?.organizationId ?? "";
+  await getSql()`
+    INSERT INTO clinic_state (organization_id, date, provider_id, clock)
+    VALUES (${orgId}, ${date}, ${providerId}, ${iso})
+    ON CONFLICT (date, provider_id) DO UPDATE SET clock = EXCLUDED.clock, organization_id = EXCLUDED.organization_id`;
 }
 
 export interface AgendaEntry {
@@ -1134,13 +1199,11 @@ export interface ProviderAgenda {
   attendedToday: number;
 }
 
-export function providerAgenda(providerId: string, date: string): ProviderAgenda {
-  const clock = getClinicClock(providerId, date);
-  const appts = (
-    getDb()
-      .prepare("SELECT * FROM appointments WHERE provider_id = ? AND substr(start,1,10) = ? ORDER BY start")
-      .all(providerId, date) as Row[]
-  ).map(toAppointment);
+export async function providerAgenda(providerId: string, date: string): Promise<ProviderAgenda> {
+  const clock = await getClinicClock(providerId, date);
+  const rows = (await getSql()`
+    SELECT * FROM appointments WHERE provider_id = ${providerId} AND substr(start, 1, 10) = ${date} ORDER BY start`) as unknown as Row[];
+  const appts = rows.map(toAppointment);
 
   const active = appts.find((a) => a.status === "in-progress");
   const pending = appts.filter((a) => a.status === "scheduled");
@@ -1148,120 +1211,116 @@ export function providerAgenda(providerId: string, date: string): ProviderAgenda
   const offset = ref ? Math.round(minutesBetween(ref.start, clock)) : 0;
   const late = Math.max(0, offset);
 
-  const entry = (a: Appointment): AgendaEntry => {
+  const entry = async (a: Appointment): Promise<AgendaEntry> => {
     const est = addMinutes(a.start, late);
     return {
       appointmentId: a.id,
       patientId: a.patientId,
-      patientName: getPatient(a.patientId)?.fullName ?? a.patientId,
+      patientName: (await getPatient(a.patientId))?.fullName ?? a.patientId,
       reason: a.reason,
       status: a.status,
       scheduled: hm(a.start),
       estimated: hm(est),
       delayMinutes: Math.round(minutesBetween(a.start, est)),
-      isBirthday: isBirthday(a.patientId, date),
+      isBirthday: await isBirthday(a.patientId, date),
     };
   };
 
   return {
     providerId,
-    providerName: getProvider(providerId)?.name ?? providerId,
+    providerName: (await getProvider(providerId))?.name ?? providerId,
     date,
     clock: hm(clock),
     running: offset > 5 ? "atrasada" : offset < -5 ? "adelantada" : "en horario",
     offsetMinutes: offset,
-    inAttention: active ? entry(active) : undefined,
-    next: pending[0] ? entry(pending[0]) : undefined,
-    upcoming: pending.slice(1).map(entry),
+    inAttention: active ? await entry(active) : undefined,
+    next: pending[0] ? await entry(pending[0]) : undefined,
+    upcoming: await Promise.all(pending.slice(1).map(entry)),
     attendedToday: appts.filter((a) => a.status === "completed").length,
   };
 }
 
-export function startAttention(appointmentId: string): Appointment {
-  const a = getAppointment(appointmentId);
+export async function startAttention(appointmentId: string): Promise<Appointment> {
+  const a = await getAppointment(appointmentId);
   if (!a) throw new Error(`El turno ${appointmentId} no existe.`);
   if (a.status !== "scheduled") throw new Error(`El turno está ${a.status}, no se puede iniciar.`);
-  const clock = getClinicClock(a.providerId, dayOf(a.start));
-  getDb()
-    .prepare("UPDATE appointments SET status = 'in-progress', actual_start = ? WHERE id = ?")
-    .run(clock, appointmentId);
-  return getAppointment(appointmentId)!;
+  const clock = await getClinicClock(a.providerId, dayOf(a.start));
+  await getSql()`UPDATE appointments SET status = 'in-progress', actual_start = ${clock} WHERE id = ${appointmentId}`;
+  return (await getAppointment(appointmentId))!;
 }
 
-export function finishAttention(appointmentId: string, actualMinutes?: number): Appointment {
-  const a = getAppointment(appointmentId);
+export async function finishAttention(
+  appointmentId: string,
+  actualMinutes?: number,
+): Promise<Appointment> {
+  const a = await getAppointment(appointmentId);
   if (!a) throw new Error(`El turno ${appointmentId} no existe.`);
   const date = dayOf(a.start);
-  const startedAt = a.actualStart ?? getClinicClock(a.providerId, date);
+  const startedAt = a.actualStart ?? (await getClinicClock(a.providerId, date));
   const dur = Math.max(1, Math.round(actualMinutes ?? a.durationMinutes));
   const endAt = addMinutes(startedAt, dur);
-  getDb()
-    .prepare(
-      "UPDATE appointments SET status = 'completed', actual_end = ?, actual_start = COALESCE(actual_start, ?) WHERE id = ?",
-    )
-    .run(endAt, startedAt, appointmentId);
-  setClinicClock(a.providerId, date, endAt);
-  return getAppointment(appointmentId)!;
+  await getSql()`
+    UPDATE appointments
+    SET status = 'completed', actual_end = ${endAt}, actual_start = COALESCE(actual_start, ${startedAt})
+    WHERE id = ${appointmentId}`;
+  await setClinicClock(a.providerId, date, endAt);
+  return (await getAppointment(appointmentId))!;
 }
 
 /** Patient's next scheduled/in-progress appointment across the given orgs. */
-export function patientNextAppointment(patientId: string, date: string, orgIds: string[]): Appointment | undefined {
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM appointments
-       WHERE patient_id = ? AND substr(start,1,10) = ? AND status IN ('scheduled','in-progress')
-       ORDER BY start`,
-    )
-    .all(patientId, date) as Row[];
+export async function patientNextAppointment(
+  patientId: string,
+  date: string,
+  orgIds: string[],
+): Promise<Appointment | undefined> {
+  const rows = (await getSql()`
+    SELECT * FROM appointments
+    WHERE patient_id = ${patientId} AND substr(start, 1, 10) = ${date} AND status IN ('scheduled', 'in-progress')
+    ORDER BY start`) as unknown as Row[];
   return rows.map(toAppointment).find((a) => orgIds.includes(a.organizationId));
 }
 
-export function replacePatientNotice(
+export async function replacePatientNotice(
   orgId: string,
   appointmentId: string,
   patientId: string,
   date: string,
   message: string,
-): void {
-  const db = getDb();
-  db.prepare("UPDATE patient_notices SET resolved = 1 WHERE appointment_id = ? AND resolved = 0").run(appointmentId);
-  db.prepare(
-    "INSERT INTO patient_notices (id, organization_id, appointment_id, patient_id, date, created_at, message, resolved) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-  ).run(uid("ntc"), orgId, appointmentId, patientId, date, new Date().toISOString(), message);
+): Promise<void> {
+  const sql = getSql();
+  await sql`UPDATE patient_notices SET resolved = 1 WHERE appointment_id = ${appointmentId} AND resolved = 0`;
+  await sql`
+    INSERT INTO patient_notices (id, organization_id, appointment_id, patient_id, date, created_at, message, resolved)
+    VALUES (${uid("ntc")}, ${orgId}, ${appointmentId}, ${patientId}, ${date}, ${new Date().toISOString()}, ${message}, 0)`;
 }
 
-export function listPatientNotices(
+export async function listPatientNotices(
   patientId: string,
   date: string,
-): { id: string; message: string; createdAt: string }[] {
-  return (
-    getDb()
-      .prepare(
-        "SELECT id, message, created_at FROM patient_notices WHERE patient_id = ? AND date = ? AND resolved = 0 ORDER BY created_at",
-      )
-      .all(patientId, date) as Row[]
-  ).map((r) => ({ id: r.id as string, message: r.message as string, createdAt: r.created_at as string }));
+): Promise<{ id: string; message: string; createdAt: string }[]> {
+  const rows = (await getSql()`
+    SELECT id, message, created_at FROM patient_notices
+    WHERE patient_id = ${patientId} AND date = ${date} AND resolved = 0 ORDER BY created_at`) as unknown as Row[];
+  return rows.map((r) => ({ id: r.id as string, message: r.message as string, createdAt: r.created_at as string }));
 }
 
-export function resolvePatientNotice(id: string): void {
-  getDb().prepare("UPDATE patient_notices SET resolved = 1 WHERE id = ?").run(id);
+export async function resolvePatientNotice(id: string): Promise<void> {
+  await getSql()`UPDATE patient_notices SET resolved = 1 WHERE id = ${id}`;
 }
 
-export function clearNoticesForAppointment(appointmentId: string): void {
-  getDb()
-    .prepare("UPDATE patient_notices SET resolved = 1 WHERE appointment_id = ? AND resolved = 0")
-    .run(appointmentId);
+export async function clearNoticesForAppointment(appointmentId: string): Promise<void> {
+  await getSql()`UPDATE patient_notices SET resolved = 1 WHERE appointment_id = ${appointmentId} AND resolved = 0`;
 }
 
-export function earlierOpeningToday(
+export async function earlierOpeningToday(
   providerId: string,
   date: string,
   beforeHm: string,
-): { slotId: string; time: string } | undefined {
-  const clockHm = hm(getClinicClock(providerId, date));
-  const rows = getDb()
-    .prepare("SELECT id, start FROM slots WHERE provider_id = ? AND taken = 0 AND substr(start,1,10) = ? ORDER BY start")
-    .all(providerId, date) as Row[];
+): Promise<{ slotId: string; time: string } | undefined> {
+  const clockHm = hm(await getClinicClock(providerId, date));
+  const rows = (await getSql()`
+    SELECT id, start FROM slots
+    WHERE provider_id = ${providerId} AND taken = 0 AND substr(start, 1, 10) = ${date} ORDER BY start`) as unknown as Row[];
   for (const r of rows) {
     const t = (r.start as string).slice(11, 16);
     if (t >= clockHm && t < beforeHm) return { slotId: r.id as string, time: t };

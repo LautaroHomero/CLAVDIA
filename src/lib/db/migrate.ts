@@ -1,51 +1,37 @@
-import type { Database } from "better-sqlite3";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Sql } from "./connection";
 
 /**
- * Forward-only, additive migrations so the local database (`data/clinic.db`)
- * survives schema edits **without a wipe**. `CREATE TABLE IF NOT EXISTS` in
- * `SCHEMA` never alters an existing table, so a new column would otherwise only
- * appear after `rm -rf data`. This runs right after `SCHEMA` on every fresh
- * connection and only ever *adds* things (columns with a default, indexes).
+ * Forward-only migration runner. Applies every `src/lib/db/migrations/*.sql`
+ * file that hasn't run yet, in filename order, each in its own transaction,
+ * recording it in `_migrations`. Idempotent: a second run does nothing.
  *
- * To add a column: put it in the `CREATE TABLE` in `schema.ts` (for fresh DBs)
- * **and** add a line here (for existing DBs). To drop/rename a column you still
- * need a real migration or a wipe — that's intentional.
+ * Run it with `npm run db:migrate` (see `scripts/migrate.ts`), pointing
+ * `DATABASE_URL_DIRECT` at the target environment.
  */
+const MIGRATIONS_DIR = join(process.cwd(), "src/lib/db/migrations");
 
-/** `[table, column, column-definition]` — added when the column is missing. */
-const ADDITIVE_COLUMNS: ReadonlyArray<readonly [string, string, string]> = [
-  ["organizations", "city", "TEXT NOT NULL DEFAULT ''"],
-  ["users", "email", "TEXT NOT NULL DEFAULT ''"],
-  ["memberships", "can_admin", "INTEGER NOT NULL DEFAULT 0"],
-];
+export async function migrate(sql: Sql): Promise<string[]> {
+  await sql`CREATE TABLE IF NOT EXISTS _migrations (id text PRIMARY KEY, applied_at text NOT NULL)`;
 
-/**
- * Statements that reference columns added above. They live here (not in
- * `SCHEMA`) because running them against a DB that predates the column would
- * throw; by the time we get here the columns exist. All are `IF NOT EXISTS`.
- */
-const POST_COLUMN_SQL: readonly string[] = [
-  `CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (lower(trim(email))) WHERE trim(email) <> ''`,
-];
+  const appliedRows = (await sql`SELECT id FROM _migrations`) as unknown as { id: string }[];
+  const applied = new Set(appliedRows.map((r) => r.id));
 
-function tableExists(db: Database, table: string): boolean {
-  return Boolean(
-    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table),
-  );
-}
+  const files = readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
 
-function columnNames(db: Database, table: string): Set<string> {
-  // `table` values here are hard-coded constants, never user input.
-  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-  return new Set(rows.map((r) => r.name));
-}
-
-export function migrate(db: Database): void {
-  for (const [table, column, definition] of ADDITIVE_COLUMNS) {
-    if (!tableExists(db, table)) continue;
-    if (!columnNames(db, table).has(column)) {
-      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-    }
+  const ran: string[] = [];
+  for (const file of files) {
+    const id = file.replace(/\.sql$/, "");
+    if (applied.has(id)) continue;
+    const ddl = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
+    await sql.begin(async (tx) => {
+      await tx.unsafe(ddl);
+      await tx`INSERT INTO _migrations (id, applied_at) VALUES (${id}, ${new Date().toISOString()})`;
+    });
+    ran.push(id);
   }
-  for (const sql of POST_COLUMN_SQL) db.exec(sql);
+  return ran;
 }

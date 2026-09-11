@@ -7,7 +7,7 @@ import { secretaryWorkflow } from "@/workflows/secretary/workflow";
 export const maxDuration = 800;
 
 export async function POST(req: Request) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) {
     return Response.json({ error: "No autenticado." }, { status: 401 });
   }
