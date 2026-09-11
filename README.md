@@ -294,10 +294,10 @@ el resto del código.
 
 ### Usuarios sembrados
 
-El seed les deja el PIN puesto (para no pasar por "Olvidé mi PIN" en cada
-arranque), así que entran con **email + PIN**. Los pacientes sembrados también
-entran con su **DNI** (`getUserByDni` cae a buscar por la ficha). Las altas
-nuevas —hechas desde la app— arrancan sin PIN.
+Los datos de ejemplo cargados en la base dejan el PIN puesto (para no pasar por
+"Olvidé mi PIN" en cada prueba), así que entran con **email + PIN**. Los
+pacientes de ejemplo también entran con su **DNI** (`getUserByDni` cae a buscar
+por la ficha). Las altas nuevas —hechas desde la app— arrancan sin PIN.
 
 | Email | Perfil · profesión | Consultorios | PIN |
 | --- | --- | --- | --- |
@@ -533,16 +533,15 @@ y _Mis pedidos de cambio_ en revisión.
 La base es **Postgres** (un proyecto de [Supabase](https://supabase.com) por
 entorno — dev / test / prod), accedida de forma async con
 [`postgres.js`](https://github.com/porsager/postgres) desde
-[`src/lib/db/connection.ts`](src/lib/db/connection.ts). El schema y el seed
-**no** corren en el path de request: son migraciones `.sql` versionadas en
+[`src/lib/db/connection.ts`](src/lib/db/connection.ts). El schema **no** corre
+en el path de request: son migraciones `.sql` versionadas en
 [`src/lib/db/migrations/`](src/lib/db/migrations/), aplicadas con
 `npm run db:migrate` ([`scripts/migrate.ts`](scripts/migrate.ts), runner en
-[`src/lib/db/migrate.ts`](src/lib/db/migrate.ts)) y sembradas con
-`npm run db:seed` ([`scripts/seed.ts`](scripts/seed.ts), datos en
-[`src/lib/db/seed.ts`](src/lib/db/seed.ts)). Todas las queries pasan por
-[`src/lib/db/repo.ts`](src/lib/db/repo.ts) (async de punta a punta). El SQL
-editor de Supabase sirve para consultar cualquiera de los tres entornos
-directamente.
+[`src/lib/db/migrate.ts`](src/lib/db/migrate.ts)). Todas las queries pasan por
+[`src/lib/db/repo.ts`](src/lib/db/repo.ts) (async de punta a punta). No hay
+seed local ni datos embebidos en el repo — cada entorno **es** un proyecto de
+Supabase real y sus datos viven ahí; el SQL editor de Supabase sirve para
+consultar (o cargar) cualquiera de los tres directamente.
 
 | Tabla | Para qué |
 | --- | --- |
@@ -583,15 +582,16 @@ cd plaude-medical-secretary
 npm install
 cp .env.example .env.local          # ANTHROPIC_API_KEY, AUTH_SECRET, DATABASE_URL(_DIRECT)
 npm run db:migrate                   # crea el schema en el proyecto de DATABASE_URL_DIRECT
-npm run db:seed                      # datos de ejemplo (no-op si ya hay organizaciones)
 npm run dev                          # http://localhost:3000
 ```
 
-Entrá y elegí un usuario de la tabla de arriba. `DATABASE_URL` / `DATABASE_URL_DIRECT`
-salen del proyecto de Supabase en Settings → Database (connection string pooled
-y directa respectivamente — ver [`.env.example`](.env.example)); apuntar esas
-dos variables a otro proyecto es todo lo que hace falta para moverse entre
-dev / test / prod, el código no sabe en qué entorno está. Para agregar una
+`DATABASE_URL` / `DATABASE_URL_DIRECT` salen del proyecto de Supabase en
+Settings → Database (connection string pooled y directa respectivamente — ver
+[`.env.example`](.env.example)); apuntar esas dos variables a otro proyecto es
+todo lo que hace falta para moverse entre dev / test / prod, el código no sabe
+en qué entorno está. No hay seed local: la data (organizaciones, profesionales,
+pacientes de ejemplo) ya vive cargada en cada proyecto de Supabase — entrá y
+elegí un usuario de la tabla de arriba. Para agregar una
 migración nueva: un archivo `NNNN_algo.sql` en `src/lib/db/migrations/` y
 `npm run db:migrate` en cada entorno.
 
@@ -603,7 +603,7 @@ migración nueva: un archivo `NNNN_algo.sql` en `src/lib/db/migrations/` y
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | ✅ | Modelo del agente. https://console.anthropic.com |
 | `DATABASE_URL` | ✅ | Connection string **pooled** de Supabase (puerto 6543) — la usa la app en runtime. |
-| `DATABASE_URL_DIRECT` | ✅ para migrar/seedear | Connection string **directa** de Supabase (puerto 5432) — solo la usan `npm run db:migrate` / `db:seed`. |
+| `DATABASE_URL_DIRECT` | ✅ para migrar | Connection string **directa** de Supabase (puerto 5432) — solo la usa `npm run db:migrate`. |
 | `AUTH_SECRET` | ✅ en prod | Firma la cookie de sesión (HMAC). En dev cae a un default; **en producción es obligatoria** y debe medir ≥ 32 chars random o la app no arranca (`openssl rand -base64 48`). |
 | `AGENT_MODEL` | — | Id de modelo Anthropic. Default `claude-haiku-4-5-20251001` (barato para probar; se puede subir a `claude-sonnet-4-5`). |
 | `NOTIFY_TRANSPORT` | — | Canal de salida de los códigos de recuperación de PIN. Default `log` (los imprime en la consola del server — alcanza para dev y un primer deploy). `resend` / `twilio` se implementan en [`src/lib/notify`](src/lib/notify) y se activan acá (con `RESEND_API_KEY` / `TWILIO_*`). |
@@ -768,7 +768,7 @@ src/
     ├── db/
     │   ├── connection.ts             singleton postgres.js (pooled, prepare:false)
     │   ├── migrate.ts migrations/*.sql   runner de migraciones versionadas
-    │   ├── seed.ts slots.ts          datos de ejemplo (async, sql.begin transacción)
+    │   ├── slots.ts                  genera la grilla de horarios de un profesional nuevo
     │   └── repo.ts                  todas las queries tipadas y async (scope por organización)
     ├── domain/
     │   ├── {types.ts,briefing.ts,clock.ts,specialties.ts}
