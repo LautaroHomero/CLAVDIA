@@ -99,6 +99,7 @@ export interface Provider {
   specialty: string;
   roomLabel: string;
   defaultFee: number; // ARS per standard consultation
+  active: boolean; // false = dado de baja: fuera de la agenda, historial intacto
 }
 
 export interface PriceItem {

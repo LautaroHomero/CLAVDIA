@@ -146,7 +146,13 @@ export async function GET(req: Request) {
       specialty: actor.activeOrg?.specialty ?? null,
       canAdmin: Boolean(actor.activeOrg?.canAdmin),
     },
-    providers: providers.map((p) => ({ name: p.name, specialty: p.specialty, roomLabel: p.roomLabel })),
+    providers: providers.map((p) => ({
+      id: p.id,
+      name: p.name,
+      specialty: p.specialty,
+      roomLabel: p.roomLabel,
+      active: p.active,
+    })),
     calendar: { title: org ? `Agenda · ${org.name}` : "Agenda", days: groupByDate(rows) },
     providerSettings:
       actor.role === "medico" && actor.activeOrg?.providerId

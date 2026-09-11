@@ -43,7 +43,7 @@ type SystemData =
       role: "staff";
       organization: { name: string; address: string; city: string; hours: string; phone: string } | null;
       me: { name: string; role: "medico" | "recepcion"; specialty: string | null; canAdmin: boolean };
-      providers: { name: string; specialty: string; roomLabel: string }[];
+      providers: { id: string; name: string; specialty: string; roomLabel: string; active: boolean }[];
       calendar: CalData;
       providerSettings: ProviderSettings | null;
       changeRequests: ChangeReq[];
@@ -420,13 +420,8 @@ function ProfesionalesPanel({
         </p>
       ) : (
         <div className="grid gap-2 sm:grid-cols-2">
-          {data.providers.map((p, i) => (
-            <div key={i} className="rounded-lg border border-hairline px-3.5 py-3">
-              <p className="text-[13px] font-medium text-ink">{p.name}</p>
-              <p className="text-[12px] text-muted">
-                {p.specialty} · {p.roomLabel}
-              </p>
-            </div>
+          {data.providers.map((p) => (
+            <ProviderRow key={p.id} provider={p} onDone={onDone} />
           ))}
         </div>
       )}
@@ -436,6 +431,66 @@ function ProfesionalesPanel({
       </div>
 
       {data.providers.length === 0 && <OnboardingChecklist />}
+    </div>
+  );
+}
+
+/** One team member row, with dar de baja / reactivar. */
+function ProviderRow({
+  provider,
+  onDone,
+}: {
+  provider: { id: string; name: string; specialty: string; roomLabel: string; active: boolean };
+  onDone: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function toggle() {
+    const next = !provider.active;
+    if (!next && !window.confirm(`¿Dar de baja a ${provider.name}? Deja de recibir turnos nuevos; su historial no se toca.`)) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const r = await fetch(`/api/professionals/${provider.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ active: next }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        setError(d.error ?? "No se pudo actualizar.");
+        return;
+      }
+      onDone(d.message ?? "Listo.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={`rounded-lg border px-3.5 py-3 ${provider.active ? "border-hairline" : "border-hairline bg-canvas opacity-70"}`}>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-[13px] font-medium text-ink">
+            {provider.name}
+            {!provider.active && <span className="ml-1.5 text-[11px] font-normal text-muted">(de baja)</span>}
+          </p>
+          <p className="text-[12px] text-muted">
+            {provider.specialty} · {provider.roomLabel}
+          </p>
+        </div>
+        <button
+          className="shrink-0 text-[11px] font-medium text-muted hover:text-ink disabled:opacity-50"
+          disabled={busy}
+          onClick={toggle}
+        >
+          {provider.active ? "Dar de baja" : "Reactivar"}
+        </button>
+      </div>
+      {error && <p className="mt-1 text-[11px] text-[#c0392b]">{error}</p>}
     </div>
   );
 }

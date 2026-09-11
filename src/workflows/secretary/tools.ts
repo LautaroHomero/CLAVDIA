@@ -173,7 +173,7 @@ async function clinicInfoStep({ organization }: { organization?: string }, ctx: 
     orgId = staffOrgId(ctx);
   }
   if (!orgId) return { ok: false, error: "Sin organización." };
-  const [org, providers] = await Promise.all([getOrganization(orgId), listProviders(orgId)]);
+  const [org, providers] = await Promise.all([getOrganization(orgId), listProviders(orgId, { activeOnly: true })]);
   return {
     ok: true,
     name: org!.name,

@@ -39,6 +39,7 @@ const toProvider = (r: Row): Provider => ({
   specialty: r.specialty as string,
   roomLabel: r.room_label as string,
   defaultFee: Number(r.default_fee ?? 0),
+  active: Boolean(r.active ?? true),
 });
 
 const toMedication = (r: Row): Medication => ({
@@ -438,14 +439,30 @@ export async function addMembership(args: {
 // Providers (per org)
 // ---------------------------------------------------------------------------
 
-export async function listProviders(orgId: string): Promise<Provider[]> {
-  const rows = (await getSql()`SELECT * FROM providers WHERE organization_id = ${orgId} ORDER BY name`) as unknown as Row[];
+export async function listProviders(
+  orgId: string,
+  opts: { activeOnly?: boolean } = {},
+): Promise<Provider[]> {
+  const rows = (await getSql()`
+    SELECT * FROM providers
+    WHERE organization_id = ${orgId}
+      AND (${opts.activeOnly ?? false} = false OR active = true)
+    ORDER BY name`) as unknown as Row[];
   return rows.map(toProvider);
 }
 
 export async function getProvider(id: string): Promise<Provider | undefined> {
   const [r] = (await getSql()`SELECT * FROM providers WHERE id = ${id}`) as unknown as Row[];
   return r ? toProvider(r) : undefined;
+}
+
+/**
+ * Dar de baja / reactivar un profesional. No borra nada: un profesional
+ * inactivo deja de ofrecer turnos nuevos (ver `listOpenSlots`) pero su
+ * historial (turnos, facturas, informes) sigue intacto y visible.
+ */
+export async function setProviderActive(id: string, active: boolean): Promise<void> {
+  await getSql()`UPDATE providers SET active = ${active} WHERE id = ${id}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -857,12 +874,15 @@ export async function listOpenSlots(
   orgId: string,
   opts: { providerId?: string; date?: string } = {},
 ): Promise<Slot[]> {
+  // Excluye slots de profesionales dados de baja: no se ofrecen turnos nuevos
+  // con ellos, aunque sus turnos ya tomados sigan intactos en `appointments`.
   const rows = (await getSql()`
-    SELECT * FROM slots
-    WHERE organization_id = ${orgId} AND taken = 0
-      AND (${opts.providerId ?? null}::text IS NULL OR provider_id = ${opts.providerId ?? null})
-      AND (${opts.date ?? null}::text IS NULL OR substr(start, 1, 10) = ${opts.date ?? null})
-    ORDER BY start`) as unknown as Row[];
+    SELECT s.* FROM slots s
+    JOIN providers p ON p.id = s.provider_id
+    WHERE s.organization_id = ${orgId} AND s.taken = 0 AND p.active = true
+      AND (${opts.providerId ?? null}::text IS NULL OR s.provider_id = ${opts.providerId ?? null})
+      AND (${opts.date ?? null}::text IS NULL OR substr(s.start, 1, 10) = ${opts.date ?? null})
+    ORDER BY s.start`) as unknown as Row[];
   return rows.map(toSlot);
 }
 
