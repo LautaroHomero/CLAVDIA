@@ -31,7 +31,7 @@ function resolvePatientOrgId(actor: Actor, requested?: string): string | { error
 
 /** Manual booking (patient self-service, or reception / doctor for a patient). */
 export async function POST(req: Request) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) return Response.json({ ok: false, error: "No autenticado." }, { status: 401 });
 
   const body = (await req.json()) as BookBody;
@@ -39,7 +39,7 @@ export async function POST(req: Request) {
   const reason = body.reason?.trim() || "Consulta";
   if (!slotId) return Response.json({ ok: false, error: "Falta el horario." }, { status: 400 });
 
-  const slot = getSlot(slotId);
+  const slot = await getSlot(slotId);
   if (!slot) return Response.json({ ok: false, error: "Ese horario no existe." }, { status: 404 });
   if (slot.taken) return Response.json({ ok: false, error: "Ese horario ya fue tomado." }, { status: 409 });
 
@@ -57,23 +57,24 @@ export async function POST(req: Request) {
     organizationId = resolved;
     patientId = actor.patientId;
 
-    if (getProviderSettings(slot.providerId).whoCanChange === "staff_only") {
+    const settings = await getProviderSettings(slot.providerId);
+    if (settings.whoCanChange === "staff_only") {
       return Response.json(
         { ok: false, error: "Este profesional no toma turnos online. Escribile a recepción o usá el asistente." },
         { status: 403 },
       );
     }
-    if (!patientInOrg(patientId, organizationId)) joinPatientOrg(patientId, organizationId);
+    if (!(await patientInOrg(patientId, organizationId))) await joinPatientOrg(patientId, organizationId);
   } else {
     organizationId = actor.activeOrg?.id ?? "";
     if (!organizationId) {
       return Response.json({ ok: false, error: "Sin organización activa." }, { status: 400 });
     }
     patientId = body.patientId?.trim() ?? "";
-    if (!patientId || !getPatient(patientId)) {
+    if (!patientId || !(await getPatient(patientId))) {
       return Response.json({ ok: false, error: "Indicá un paciente válido." }, { status: 400 });
     }
-    if (!patientInOrg(patientId, organizationId)) {
+    if (!(await patientInOrg(patientId, organizationId))) {
       return Response.json(
         { ok: false, error: "Ese paciente no está registrado en este consultorio." },
         { status: 400 },
@@ -88,17 +89,21 @@ export async function POST(req: Request) {
     }
   }
 
-  const res = bookAppointment({ organizationId, patientId, slotId, reason, createdVia: "front-desk" });
+  const res = await bookAppointment({ organizationId, patientId, slotId, reason, createdVia: "front-desk" });
   if (!res.ok) return Response.json(res, { status: 409 });
 
+  const [provider, org] = await Promise.all([
+    getProvider(res.appointment.providerId),
+    getOrganization(organizationId),
+  ]);
   return Response.json({
     ok: true,
     appointment: {
       id: res.appointment.id,
       start: res.appointment.start,
       reason: res.appointment.reason,
-      provider: getProvider(res.appointment.providerId)?.name,
-      organization: getOrganization(organizationId)?.name,
+      provider: provider?.name,
+      organization: org?.name,
     },
     price: res.price,
   });

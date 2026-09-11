@@ -7,10 +7,15 @@ workflow y le pide a una persona que apruebe o aclare, por Slack o desde la prop
 app**, antes de continuar. La pausa es *durable*: el flujo puede quedar esperando
 minutos o días sin consumir recursos y sobrevive a reinicios y redeploys.
 
-Cada persona entra con **email + PIN**. Según su rol —**profesional** (médico/a de
-cualquier especialidad, psicólogo/a…), **secretaría administrativa** o
-**paciente**— cambian sus instrucciones, sus herramientas y a qué datos puede
-acceder.
+Es **multi-consultorio**: cualquiera crea su organización con un wizard, y desde
+ahí carga profesionales y pacientes con **solo el DNI** si ya están en el sistema.
+Cada persona entra con **email o DNI + PIN**; el PIN nunca se reparte a mano — la
+persona lo elige la primera vez con **"Olvidé mi PIN"** (código de un solo uso al
+email o WhatsApp de su ficha). Según su rol —**profesional** (médico/a de cualquier
+especialidad, psicólogo/a…), **secretaría administrativa** o **paciente**— cambian
+sus instrucciones, sus herramientas y a qué datos puede acceder. La app tiene
+**dos vistas**: el chat con el agente y una **vista Sistema sin IA** (calendario
+mensual, fichas, política de turnos) para operar a mano lo mismo que hace el agente.
 
 Construido para el _Plaude Engineering Challenge_.
 
@@ -20,7 +25,7 @@ Construido para el _Plaude Engineering Challenge_.
 
 | Paso | Pedido | Dónde está |
 | --- | --- | --- |
-| **1** | UI simple en Next.js para interactuar con el agente | App Router + `useChat` (streaming SSE). [`src/app/chat-app.tsx`](src/app/chat-app.tsx) (vista Asistente) y [`src/app/system-view.tsx`](src/app/system-view.tsx) (vista Sistema, sin IA), login en [`src/app/login/page.tsx`](src/app/login/page.tsx). |
+| **1** | UI simple en Next.js para interactuar con el agente | App Router + `useChat` (streaming SSE). [`chat-app.tsx`](src/app/chat-app.tsx) (vista **Asistente**) y [`system-view.tsx`](src/app/system-view.tsx) + `system-calendar/patients/shared` (vista **Sistema**, sin IA: agendar / editar fichas a mano), login en [`login/page.tsx`](src/app/login/page.tsx). |
 | **2** | Agente con `DurableAgent` de Workflow DevKit + paso human-in-the-loop por Slack | [`src/workflows/secretary/workflow.ts`](src/workflows/secretary/workflow.ts) (el `DurableAgent`), [`hooks.ts`](src/workflows/secretary/hooks.ts) + [`request-human.ts`](src/workflows/secretary/request-human.ts) (la suspensión y el reanudado), [`src/app/api/slack/actions/route.ts`](src/app/api/slack/actions/route.ts) (webhook de Slack). |
 | **3** | Instrucciones base en texto plano con escenarios que requieren aprobación | [`src/lib/agent/instructions.md`](src/lib/agent/instructions.md) (base) + [`src/lib/agent/roles/*.md`](src/lib/agent/roles) (por rol). |
 | **4** | Email a opentowork@plaude.com con el link del repo | Enviado por separado. |
@@ -34,7 +39,7 @@ Directivas del challenge (`use next`, `use workflow`, `use github`, `use readme`
 ### 2.1 Ciclo de vida de un mensaje
 
 ```
-Login (email + PIN)
+Login ((email | DNI) + PIN)   ·   "Olvidé mi PIN" → código de un solo uso → PIN nuevo
    └─► cookie de sesión firmada (HMAC)  ─►  Actor { userId, role, name, patientId?, activeOrg? { providerId?, specialty?, canAdmin } }
 
 Usuario escribe en el chat
@@ -50,11 +55,11 @@ Usuario escribe en el chat
                               │              experimental_context: actor })
                               │       │
                               │       ├─ cada llamada al modelo            → "use step"  (reintentos, aislada)
-                              │       ├─ cada tool de dominio              → "use step"  → SQLite (data/clinic.db)
+                              │       ├─ cada tool de dominio              → "use step"  → Postgres (Supabase)
                               │       └─ requestHumanApproval / askHumanInput   (corre en contexto de workflow)
                               │              │
                               │              ├─ notifyHuman()  "use step"  ─► Slack chat.postMessage (Block Kit)
-                              │              │                             └─► INSERT pending_requests (SQLite)
+                              │              │                             └─► INSERT pending_requests (Postgres)
                               │              │
                               │              ▼   humanHook.create({ token: toolCallId })
                               │           await hook       ⏸  EL WORKFLOW SE SUSPENDE (0 CPU, durable)
@@ -101,7 +106,7 @@ que exponen dos tools: **`requestHumanApproval`** (Sí/No + nota) y **`askHumanI
    en la tabla `pending_requests`. La fila lleva `run_id`, `kind`, `summary`,
    `risk_level`, `patient_name`, `requested_by`, y la referencia al mensaje de
    Slack (`channel` + `ts`) para poder editarlo después.
-3. **La fila vive en SQLite, no en memoria.** Cada `"use step"` corre en una
+3. **La fila vive en Postgres, no en memoria.** Cada `"use step"` corre en una
    invocación de ruta aislada; un `Map` en memoria no lo verían ni `/api/approvals`
    ni `/api/slack/actions`. La DB es la fuente de verdad compartida.
 4. **Sin Slack configurado**, el pedido aparece igual en el panel de la app. Slack
@@ -115,6 +120,25 @@ que exponen dos tools: **`requestHumanApproval`** (Sí/No + nota) y **`askHumanI
 7. **Verificación de firma de Slack**: `/api/slack/actions` valida el header
    `X-Slack-Signature` (HMAC-SHA256 sobre `v0:timestamp:body`, ventana de 5 min)
    antes de tocar el workflow.
+
+### 2.4 Controles de costo del agente
+
+Todo en [`workflow.ts`](src/workflows/secretary/workflow.ts):
+
+- **`maxSteps: 10`** acota el loop de tool-calling: una tool que devuelve error en
+  bucle no puede encadenar llamadas al modelo indefinidamente. **`maxOutputTokens:
+  2048`** es un tope de seguridad (las respuestas del chat son un párrafo).
+- **Prompt caching de Anthropic.** El system prompt (base + rol + fecha +
+  "quién sos") y los esquemas de las tools son byte-estables durante toda la
+  conversación → se marcan como **prefijo cacheado con `ttl: "1h"`** (el default
+  son 5 min; se sube porque el workflow puede quedar suspendido en un hook mucho
+  rato entre steps). La **cola de la conversación** lleva un breakpoint de 5 min
+  aparte, así las múltiples llamadas dentro de un mismo turno (una por
+  tool round-trip) releen el historial desde cache en vez de re-facturarlo.
+- **Contabilidad por step** (`onStepFinish`): loguea `input / output / cacheRead
+  / cacheWrite` por organización y rol (`[secretary] llm-step …`). Solo cuenta
+  tokens; no registra contenido. Sirve para verificar que el cache pega y para
+  medir uso por consultorio.
 
 ---
 
@@ -168,30 +192,62 @@ Cambiar el comportamiento del agente = editar estos `.md`. No hay recompilar.
 
 ## 4. Roles, seguridad y login
 
-### 4.1 Login
+### 4.1 Login e identidad
 
-`/login` → **email + PIN**, para los tres roles. El PIN es de 4 dígitos, se
-guarda con `scrypt` + salt, y la sesión es una cookie `HttpOnly` firmada con HMAC
-(`AUTH_SECRET`). El email identifica al usuario y sus membresías; si el staff
-pertenece a más de un consultorio y no eligió, el endpoint responde
-`{ needsOrg: true, organizations: [...] }` y la UI pide con cuál entrar. La cookie
-guarda ese `activeOrgId`; se cambia cerrando sesión o con el selector del
-encabezado (`POST /api/auth/switch-org`).
+`/login` → **email o DNI + PIN**, para los tres roles (`identifier` en
+`POST /api/auth/login`: si tiene `@` es email, si no es DNI). El PIN es de 4
+dígitos, se guarda con `scrypt` + salt, y la sesión es una cookie `HttpOnly`
+firmada con HMAC (`AUTH_SECRET`). Si el staff pertenece a más de un consultorio y
+no eligió, el endpoint responde `{ needsOrg: true, organizations: [...] }` y la UI
+pide con cuál entrar; la cookie guarda ese `activeOrgId` (se cambia cerrando
+sesión o con el selector del encabezado, `POST /api/auth/switch-org`).
 
-- **Paciente nuevo:** _"Soy paciente y no tengo cuenta"_ → formulario (nombre,
-  DNI, fecha de nacimiento, cobertura, **email**, **consultorio**, PIN) → crea la
-  ficha **y** el login, lo asocia a ese consultorio y entra. Si el DNI ya tenía
-  ficha, la reutiliza y solo suma la asociación.
-- **Registrar un consultorio nuevo:** _"Registrar un consultorio nuevo"_ → un
-  **wizard de 3 pasos** (`POST /api/organizations`):
-  1. **El consultorio** — nombre, dirección, localidad, teléfono, horarios.
-  2. **Tu cuenta** — nombre completo, email, PIN, y **cómo vas a usar la
-     plataforma**: *secretaría administrativa* o *profesional de la salud* (con
-     especialidad y consultorio).
-  3. **Confirmar** — repaso y creación.
-  Quien funda el consultorio queda con permisos de administración
-  (`membership.can_admin`) **aunque elija "profesional"**, así una consulta de una
-  sola persona puede seguir dando de alta a más profesionales.
+**La identidad se ancla en el DNI**, no en el email. Dar de alta a alguien que ya
+está en el sistema (paciente que se atiende en otro consultorio, profesional que
+trabaja en varios) es **solo el DNI**: se lo suma a la organización sin volver a
+pedir datos. Persona nueva → nombre + email + teléfono (+ especialidad si es
+profesional). `users` guarda `dni` y `phone` además del `email`; el índice único
+por DNI ignora puntos y espacios.
+
+**El PIN no se reparte a mano.** Toda cuenta nace sin PIN (`pin_hash = ''`); la
+persona lo elige la primera vez con **"Olvidé mi PIN"**:
+
+1. `POST /api/auth/pin-reset/request` — email o DNI → **código de 6 dígitos de un
+   solo uso** al email de la ficha (o WhatsApp si se pide y hay teléfono). El
+   código se guarda **hasheado** (nunca en claro), vence en 10 min, y hay
+   *cooldown* de 60 s para no spamear. La respuesta HTTP es **idéntica exista o no
+   la cuenta** → no sirve para enumerar emails/DNIs registrados.
+2. `POST /api/auth/pin-reset/confirm` — email/DNI + código + PIN nuevo. Máximo 5
+   intentos y el código se quema. **Paciente** → queda logueado en el acto (probó
+   que controla el canal). **Staff** → se le pide iniciar sesión (puede tener que
+   elegir consultorio).
+
+El envío sale por [`src/lib/notify`](src/lib/notify) — transporte *pluggable*
+(`NOTIFY_TRANSPORT`): el default `log` imprime el código en la consola del server
+(alcanza para dev y un primer deploy); `resend` / `twilio` se enchufan sin tocar
+el resto del código.
+
+**Altas (todas siguen el mismo patrón DNI-first):**
+
+- **Paciente** (staff, chat o vista Sistema): DNI conocido → se lo suma y se le
+  asegura un login sin PIN (`ensurePatientLogin`); DNI nuevo → nombre, nacimiento,
+  cobertura, email y teléfono. En ambos casos entra con DNI/email + "Olvidé mi
+  PIN".
+- **Profesional / secretaría** (`POST /api/professionals`, solo `canAdmin`): DNI
+  conocido → se lo suma (el profesional con `providers` + agenda propias en esta
+  organización); DNI nuevo → nombre, email, teléfono (+ tipo/especialidad de
+  `SPECIALTIES` si es profesional). Dedup por DNI y después por email.
+- **Paciente por autogestión** (_"Soy paciente y no tengo cuenta"_, sin sesión):
+  si el DNI ya tiene ficha **y todavía no tiene login**, para reclamarlo el
+  **email y el teléfono deben coincidir** con los de la ficha (`normEmail` /
+  `normPhone`) → si no, `403`; si ya tiene login → `409` ("recuperá el PIN").
+- **Registrar un consultorio nuevo** → **wizard de 3 pasos** (`POST
+  /api/organizations`): (1) el consultorio — nombre, dirección, localidad,
+  teléfono, horarios; (2) tu cuenta — nombre, **DNI**, email, **teléfono**, y si
+  sos *secretaría administrativa* o *profesional* (con especialidad y consultorio);
+  (3) confirmar. Quien funda queda con `membership.can_admin` **aunque elija
+  "profesional"**, así una consulta unipersonal puede seguir sumando gente. El
+  PIN se elige igual con "Olvidé mi PIN".
 
 ### 4.2 Los tres roles
 
@@ -213,6 +269,20 @@ encabezado (`POST /api/auth/switch-org`).
   intente.
 - Chequeos dentro de cada step (ej. `closeDay` exige `recepcion`;
   `registerProfessional` y `POST /api/professionals` exigen `activeOrg.canAdmin`).
+- **Los endpoints REST manuales** (`/api/appointments/**`, `/api/patients/**`,
+  `/api/providers/settings`, `/api/appointment-changes`) repiten el mismo control
+  del lado del servidor: un paciente solo toca su ficha y sus turnos; un médico,
+  solo su propia agenda; recepción, solo su consultorio activo. La UI nunca es la
+  autoridad.
+- **`AUTH_SECRET` en producción**: si no está seteado (o mide < 32 chars, o es el
+  default de dev), la app **no arranca** — un secreto conocido dejaría forjar
+  cookies de sesión y suplantar cualquier rol/consultorio. En dev cae al default.
+  La cookie lleva `Secure` solo en producción (para que el `http` local funcione).
+- **Recuperación de PIN** (`pin_reset_codes`): el código va **hasheado con salt**
+  por fila, con TTL de 10 min, tope de 5 intentos (después se quema) y *cooldown*
+  de reenvío. La respuesta del endpoint `request` no cambia según exista o no la
+  cuenta → **sin enumeración**. El destino se muestra siempre enmascarado
+  (`ma••••@dominio`, `••• 4040`).
 
 ### Consultorios sembrados
 
@@ -224,7 +294,10 @@ encabezado (`POST /api/auth/switch-org`).
 
 ### Usuarios sembrados
 
-Todos entran con **email + PIN**.
+El seed les deja el PIN puesto (para no pasar por "Olvidé mi PIN" en cada
+arranque), así que entran con **email + PIN**. Los pacientes sembrados también
+entran con su **DNI** (`getUserByDni` cae a buscar por la ficha). Las altas
+nuevas —hechas desde la app— arrancan sin PIN.
 
 | Email | Perfil · profesión | Consultorios | PIN |
 | --- | --- | --- | --- |
@@ -265,8 +338,9 @@ Cómo lo ve cada rol:
 
 - **Staff** trabaja dentro de **un** consultorio activo (`actor.activeOrg`). Las
   altas, la agenda, los precios y el reporte quedan ahí. `registerProfessional`
-  (chat) y `POST /api/professionals` (vista Sistema) reutilizan el usuario si esa
-  persona ya tiene cuenta (mismo email); su PIN sigue siendo el de siempre.
+  (chat) y `POST /api/professionals` (vista Sistema) dedup por **DNI**: si la
+  persona ya está en el sistema, se la suma a esta organización sin re-tipear
+  datos (el profesional con `providers` + agenda propias acá).
 - **Paciente** opera en **todos** sus consultorios a la vez (`actor.orgs`): un
   único briefing, una única lista de turnos. `listOrganizations` /
   `joinOrganization` para sumarse a otro; cuando una acción depende del lugar y
@@ -309,6 +383,13 @@ y los chequeos de rol.
 | `rescheduleAppointment` | todos | Cancela + reagenda a otro slot; conserva `price`; reavisa a los que esperan. | Mismas reglas que cancelar. |
 | `listMyAgenda` | profesional, recepción | Agenda de turnos (para el profesional, filtrada a su consultorio) con alertas por paciente (resultado pendiente, factura impaga). | — |
 
+`scheduleAppointment` / `cancelAppointment` / `rescheduleAppointment` no tienen la
+lógica propia: llaman a [`src/lib/domain/scheduling.ts`](src/lib/domain/scheduling.ts)
+(`bookAppointment` / `cancelAppointment` / `rescheduleAppointment` +
+`refreshWaitingNotices`), **el mismo módulo** que usan los endpoints REST de la
+vista Sistema. Una sola implementación de "reservar / liberar / reprogramar y
+reacomodar los avisos de demora", con la autorización afuera.
+
 ### 5.4 Agenda en vivo (la jornada "respira")
 
 El demo simula un reloj por profesional (`clinic_state`) que arranca en el primer
@@ -343,12 +424,12 @@ turno y avanza a medida que se atiende. Cada turno guarda `actual_start` /
 | `getDailyReport` | profesional, recepción | Resumen del día: atendidos / cancelados / pendientes / **recaudado**, con detalle. El profesional ve el suyo; recepción todo el consultorio (o filtra por uno). |
 | `closeDay` | **solo recepción** | Cierre del día: calcula y **guarda** el resumen del consultorio y el de cada profesional (`daily_reports`), y lo **publica en Slack**. Simula lo que en producción dispararía un workflow durable al terminar el último turno. |
 
-### 5.7 Altas
+### 5.7 Altas (DNI-first, sin PIN a mano)
 
 | Tool | Roles | Qué hace |
 | --- | --- | --- |
-| `registerPatient` | profesional, recepción | Da de alta un paciente (nombre, DNI, fecha de nacimiento, cobertura) **y lo asocia al consultorio activo**. No duplica por DNI (si ya tenía ficha, solo suma la asociación). Crea la ficha, no el login (eso lo hace el propio paciente desde `/login`). |
-| `registerProfessional` | **secretaría o profesional fundador** (`canAdmin`) | Da de alta a alguien del equipo **en el consultorio activo**. `role: "medico"` (default) → profesional: nombre con título, **email**, **tipo/especialidad** (deportólogo, cardiólogo, psicólogo, kinesiólogo…), consultorio, PIN → `provider` + `membership` + login + **agenda**. `role: "recepcion"` → secretaría administrativa: nombre, email, PIN (sin especialidad ni agenda). Si esa persona ya tenía cuenta (mismo email), reutiliza su usuario y PIN. También como formulario en la vista Sistema. |
+| `registerPatient` | profesional, recepción | **DNI conocido** → se lo suma al consultorio activo y se le asegura un login sin PIN (`ensurePatientLogin`), sin pedir nada más. **DNI nuevo** → además nombre, nacimiento (AAAA-MM-DD), cobertura, email y teléfono. En los dos casos el paciente entra con su DNI/email + "Olvidé mi PIN". |
+| `registerProfessional` | **secretaría o profesional fundador** (`canAdmin`) | `role: "medico"` (default) o `"recepcion"`. **DNI conocido** → se suma a la organización: el profesional con `providers` + `membership` + **agenda** propias; la secretaría con `membership` `can_admin`. **DNI nuevo** → además nombre, email, teléfono (+ tipo/especialidad de `SPECIALTIES` si es `medico`). Dedup por DNI y después email. **Nunca se asigna un PIN**: la persona lo elige con "Olvidé mi PIN". También como formulario en la vista Sistema ("+ Agregar al equipo"). |
 
 ---
 
@@ -395,44 +476,88 @@ role-aware) y `GET /api/calendar` (el mini-calendario, role-aware).
 
 ### 6.2 Vista **Sistema** (sin IA)
 
-El mismo dato, sin agente: un **calendario** grande a la izquierda y un panel de
-fichas a la derecha. Todo de solo lectura — las altas y los cambios siguen
-haciéndose desde el chat. Una sola llamada: `GET /api/system` (polling 5 s).
+El mismo dominio, **operable a mano**, sin gastar tokens. `GET /api/system` /
+`/api/calendar-grid` alimentan la lectura (polling); las mutaciones van a
+endpoints REST dedicados que comparten la lógica con el agente (`scheduling.ts`).
+Cada acción vuelve a chequear rol / consultorio / propiedad en el servidor.
 
-- **Staff** (médico/a y **secretaría**): pestañas **Calendario · Lista ·
-  Pacientes** (agenda **de todo el consultorio activo**: hora · paciente ·
-  profesional · motivo · estado, con 🎂), y a la derecha _Mi perfil_ y
-  _Consultorio_ (dirección + localidad, horarios, teléfono).
-  Si el usuario administra el consultorio (`canAdmin`) aparece además la pestaña
-  **Profesionales**: la lista del equipo + **"+ Agregar al equipo"**
-  (`POST /api/professionals`) — toggle **Profesional / Secretaría**; si es
-  profesional se elige el **tipo** de una lista (`SPECIALTIES`) con opción
-  "Otra…"; y una checklist de _Primeros pasos_ mientras no haya profesionales.
-- **Paciente**: su calendario (turnos de **todos** sus consultorios) y _Mi ficha_
-  — datos personales, cobertura, alergias, condiciones activas, medicación
-  (marca las crónicas) y en qué consultorios está.
+**Staff** (médico/a y secretaría) — pestañas:
+
+- **Calendario** — un **calendario mensual** (`MonthCalendar`): elegís
+  profesional (el médico queda fijo al suyo), ves cuántos turnos y cuántos huecos
+  por día, entrás a un día y ahí **agendás** (elegís paciente con `PatientPicker`
+  + horario con `SlotPicker` → `POST /api/appointments`), **cancelás** o
+  **reprogramás** cada turno (`PATCH/DELETE /api/appointments/[id]`). Cancelar o
+  mover un turno de hoy reacomoda los avisos de demora igual que por el chat.
+- **Lista** — la agenda del consultorio como lista por día, con las mismas
+  acciones por fila + botón **"+ Nuevo turno"**.
+- **Pacientes** — buscador de los pacientes del consultorio
+  (`/api/patients/search`: nombre / DNI / email / teléfono). Abrís una ficha y
+  **editás** datos, cobertura, alergias, condiciones y notas
+  (`PATCH /api/patients/[id]`); **agregás / quitás medicación**
+  (`/api/patients/[id]/medications[/medId]`); y **"+ Nuevo paciente"**: el campo
+  es el **DNI** — si ya está en el sistema alcanza con eso; si es nuevo/a se
+  despliegan nombre, nacimiento, cobertura, email y teléfono.
+- **Profesionales** — solo si `canAdmin`: la lista del equipo + **"+ Agregar al
+  equipo"** (`POST /api/professionals`, toggle **Profesional / Secretaría**).
+  Primer campo: el **DNI**. Si la persona ya está en el sistema, con eso se la
+  suma; si es nueva se piden nombre, email, teléfono y —si es profesional— el
+  **tipo** de `SPECIALTIES` (con "Otra…"). **Sin campo de PIN**: entra con "Olvidé
+  mi PIN". Checklist de _Primeros pasos_ mientras no haya profesionales.
+
+Panel derecho del staff: _Mi perfil_, _Consultorio_ (dirección + localidad,
+horarios, teléfono) y —solo para el médico— **_Cambios de turno (mi agenda)_**:
+dos políticas por profesional (`provider_settings`, `PATCH /api/providers/settings`):
+
+| Ajuste | Opciones |
+| --- | --- |
+| **¿Quién puede sacar o cambiar turnos?** | `anyone` (incluye al paciente) · `staff_only` (solo recepción y el/la profesional) |
+| **Cambios del paciente con < 24 h** | `direct` · `needs_approval` (queda pendiente de aprobación) |
+
+Cuando un cambio del paciente cae en `needs_approval`, se crea una fila en
+`appointment_change_requests` y aparece en **_Pedidos de cambio_** (del médico, o
+de todo el consultorio para recepción): **Aprobar** aplica la
+cancelación/reprogramación, **Rechazar** la descarta (`POST /api/appointment-changes`).
+
+**Paciente** — su calendario (turnos de **todos** sus consultorios) con
+**cancelar / reprogramar** por turno *respetando la política del profesional*
+(`manageFlags`: bloqueado si es `staff_only`; si es `< 24 h` + `needs_approval`,
+el botón crea un pedido en vez de aplicar el cambio). Más _Mi ficha_ (datos,
+cobertura, alergias, condiciones, medicación con marca de crónica, consultorios)
+y _Mis pedidos de cambio_ en revisión.
 
 ---
 
-## 7. Modelo de datos (SQLite, `data/clinic.db`)
+## 7. Modelo de datos (Postgres / Supabase)
 
-Se crea y siembra sola en el primer arranque y **persiste** entre ejecuciones.
-En cada conexión: `SCHEMA` (`CREATE … IF NOT EXISTS`) →
-[`migrate.ts`](src/lib/db/migrate.ts) (agrega columnas/índices nuevos in situ, sin
-tocar los datos) → `seedIfEmpty` (solo si no hay organizaciones). Todas las
-queries pasan por [`src/lib/db/repo.ts`](src/lib/db/repo.ts).
+La base es **Postgres** (un proyecto de [Supabase](https://supabase.com) por
+entorno — dev / test / prod), accedida de forma async con
+[`postgres.js`](https://github.com/porsager/postgres) desde
+[`src/lib/db/connection.ts`](src/lib/db/connection.ts). El schema y el seed
+**no** corren en el path de request: son migraciones `.sql` versionadas en
+[`src/lib/db/migrations/`](src/lib/db/migrations/), aplicadas con
+`npm run db:migrate` ([`scripts/migrate.ts`](scripts/migrate.ts), runner en
+[`src/lib/db/migrate.ts`](src/lib/db/migrate.ts)) y sembradas con
+`npm run db:seed` ([`scripts/seed.ts`](scripts/seed.ts), datos en
+[`src/lib/db/seed.ts`](src/lib/db/seed.ts)). Todas las queries pasan por
+[`src/lib/db/repo.ts`](src/lib/db/repo.ts) (async de punta a punta). El SQL
+editor de Supabase sirve para consultar cualquiera de los tres entornos
+directamente.
 
 | Tabla | Para qué |
 | --- | --- |
 | `organizations` | los consultorios (inquilinos): nombre, `slug`, dirección, **localidad**, horarios, teléfono. |
-| `users` | login **global**: nombre, **email** (único, identificador de login), rol, `pin_hash`/`pin_salt` (scrypt), `patient_id`. |
+| `users` | login **global**: nombre, **email** + **dni** (ambos con índice único, cualquiera sirve para entrar), **phone**, rol, `pin_hash`/`pin_salt` (scrypt; `''` = todavía sin PIN), `patient_id`. |
+| `pin_reset_codes` | códigos de un solo uso para recuperar / activar el PIN: `code_hash`/`code_salt`, `channel` (`email`/`whatsapp`), `sent_to` (enmascarado), `attempts`, `expires_at`, `consumed_at`. |
 | `memberships` | staff × organización: `role`, `provider_id` en ese consultorio y `can_admin`. Un profesional puede tener varias. |
 | `patient_organizations` | paciente × organización: en qué consultorios está asociado. |
 | `providers` | profesionales (por consultorio): nombre, especialidad, consultorio, `default_fee`. |
 | `provider_prices` | prácticas con nombre y precio, por profesional. |
+| `provider_settings` | política de **cambios manuales de turno** por profesional: `who_can_change` (`anyone`/`staff_only`), `late_change_policy` (`direct`/`needs_approval`). |
 | `patients`, `medications` | fichas y medicación — **globales** (una ficha por persona). |
 | `slots` | grilla de horarios (09–12, cada 30', próximos días hábiles), `taken`. |
-| `appointments` | turnos: `status` (`scheduled` / `in-progress` / `completed` / `cancelled`), `price`, `actual_start`/`actual_end`. |
+| `appointments` | turnos: `status` (`scheduled` / `in-progress` / `completed` / `cancelled`), `price`, `actual_start`/`actual_end`, `created_via`. |
+| `appointment_change_requests` | cambio de turno de un paciente con < 24 h que espera visto bueno del profesional: `kind` (`cancel`/`reschedule`), `new_slot_id`, `status` (`pending`/`approved`/`rejected`). |
 | `invoices`, `lab_results` | facturación y resultados. |
 | `prescription_requests`, `patient_messages` | pedidos de receta y mensajes enviados. |
 | `pending_requests` | **la fila human-in-the-loop** (fuente de verdad compartida por workflow, UI y Slack). |
@@ -441,33 +566,35 @@ queries pasan por [`src/lib/db/repo.ts`](src/lib/db/repo.ts).
 | `patient_notices` | los avisos de demora que se le muestran a cada paciente. |
 
 Todas las tablas transaccionales (`providers`, `slots`, `appointments`,
-`invoices`, `lab_results`, `prescription_requests`, `patient_messages`,
-`pending_requests`, `clinic_state`, `patient_notices`, `daily_reports`) llevan
-`organization_id` y las queries de `repo.ts` filtran por él.
+`appointment_change_requests`, `invoices`, `lab_results`, `prescription_requests`,
+`patient_messages`, `pending_requests`, `clinic_state`, `patient_notices`,
+`daily_reports`) llevan `organization_id` y las queries de `repo.ts` filtran por él.
 
 ---
 
 ## 8. Puesta en marcha
 
-Requisitos: **Node ≥ 20**, toolchain de C (para compilar `better-sqlite3`), y una
-**API key de Anthropic con saldo**.
+Requisitos: **Node ≥ 20**, un proyecto de **Supabase** (gratis alcanza para
+dev/test) y una **API key de Anthropic con saldo**.
 
 ```bash
 git clone <este-repo>
 cd plaude-medical-secretary
 npm install
-cp .env.example .env.local          # completá ANTHROPIC_API_KEY (y AUTH_SECRET)
+cp .env.example .env.local          # ANTHROPIC_API_KEY, AUTH_SECRET, DATABASE_URL(_DIRECT)
+npm run db:migrate                   # crea el schema en el proyecto de DATABASE_URL_DIRECT
+npm run db:seed                      # datos de ejemplo (no-op si ya hay organizaciones)
 npm run dev                          # http://localhost:3000
 ```
 
-Entrá, elegí un usuario de la tabla de arriba y probá. La DB (`data/clinic.db`)
-se siembra en el primer arranque y **persiste** entre `npm run dev`: el esquema
-es todo `IF NOT EXISTS`, [`migrate.ts`](src/lib/db/migrate.ts) agrega columnas
-nuevas in situ y el seed solo corre si la base está vacía. Borrá `data/` solo si
-querés volver a los datos de ejemplo (o `git pull` trae un cambio de esquema no
-aditivo).
+Entrá y elegí un usuario de la tabla de arriba. `DATABASE_URL` / `DATABASE_URL_DIRECT`
+salen del proyecto de Supabase en Settings → Database (connection string pooled
+y directa respectivamente — ver [`.env.example`](.env.example)); apuntar esas
+dos variables a otro proyecto es todo lo que hace falta para moverse entre
+dev / test / prod, el código no sabe en qué entorno está. Para agregar una
+migración nueva: un archivo `NNNN_algo.sql` en `src/lib/db/migrations/` y
+`npm run db:migrate` en cada entorno.
 
-- Si `better-sqlite3` no carga: `npm rebuild better-sqlite3`.
 - Observabilidad de los workflows (runs, steps, reintentos, suspensiones): `npx workflow web`.
 
 ### Variables de entorno
@@ -475,8 +602,11 @@ aditivo).
 | Variable | Requerida | Descripción |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | ✅ | Modelo del agente. https://console.anthropic.com |
-| `AUTH_SECRET` | recomendada | Firma la cookie de sesión. Sin ella usa un default de dev. |
+| `DATABASE_URL` | ✅ | Connection string **pooled** de Supabase (puerto 6543) — la usa la app en runtime. |
+| `DATABASE_URL_DIRECT` | ✅ para migrar/seedear | Connection string **directa** de Supabase (puerto 5432) — solo la usan `npm run db:migrate` / `db:seed`. |
+| `AUTH_SECRET` | ✅ en prod | Firma la cookie de sesión (HMAC). En dev cae a un default; **en producción es obligatoria** y debe medir ≥ 32 chars random o la app no arranca (`openssl rand -base64 48`). |
 | `AGENT_MODEL` | — | Id de modelo Anthropic. Default `claude-haiku-4-5-20251001` (barato para probar; se puede subir a `claude-sonnet-4-5`). |
+| `NOTIFY_TRANSPORT` | — | Canal de salida de los códigos de recuperación de PIN. Default `log` (los imprime en la consola del server — alcanza para dev y un primer deploy). `resend` / `twilio` se implementan en [`src/lib/notify`](src/lib/notify) y se activan acá (con `RESEND_API_KEY` / `TWILIO_*`). |
 | `SLACK_BOT_TOKEN` | — | Bot token (`xoxb-…`). Sin esto, el human-in-the-loop usa solo el panel de la UI. |
 | `SLACK_SIGNING_SECRET` | — | Verifica la firma de los webhooks de Slack. |
 | `SLACK_APPROVAL_CHANNEL` | — | **ID** del canal de aprobaciones (ej. `C0123ABCDE`). |
@@ -526,34 +656,49 @@ aditivo).
 **Gratis, sin gastar tokens** (login y paneles):
 
 - Login `elena.ruiz@clavdia.test` / `2468` → como está en dos consultorios, la UI
-  pide **elegir cuál** (Belgrano / Palermo). Email o PIN mal → error.
+  pide **elegir cuál** (Belgrano / Palermo). Datos o PIN mal → error genérico.
 - Con Dra. Ruiz adentro (entró por Belgrano), usá el **selector de consultorio
   del encabezado**: la agenda y el panel cambian a Palermo.
-- "Registrar un consultorio nuevo" → **wizard de 3 pasos**. Probá el paso 2 como
-  *profesional* (elegís el **tipo** de una lista, con "Otra…") y como *secretaría*.
-  Al crear entrás directo; en la vista Sistema aparece la pestaña **Profesionales**
-  con **"+ Agregar al equipo"** y la checklist de primeros pasos.
-- "Soy paciente y no tengo cuenta" → alta por autogestión (ahora con **email**).
-- Login `maria.gomez@example.com` / `1111` → *Mis turnos* muestra turnos de
-  **Belgrano y Palermo** juntos.
+- Login `28.444.123` / `1111` (María por **DNI** en vez de email) → misma sesión.
+- **"Olvidé mi PIN"** con `maria.gomez@example.com` o `28444123` → mirá la consola
+  del server: el transporte `log` imprime el código de 6 dígitos. Pegalo + un PIN
+  nuevo → María queda logueada. Pedirlo para un email inexistente devuelve el
+  **mismo** mensaje (sin filtrar si existe).
+- "Registrar un consultorio nuevo" → **wizard de 3 pasos**. En el paso 2 va tu
+  **DNI + teléfono** y si sos *profesional* (elegís el **tipo**, con "Otra…") o
+  *secretaría*. Al crear entrás directo; primera vez sin PIN → te manda a "Olvidé
+  mi PIN". En la vista Sistema aparece la pestaña **Profesionales** con
+  **"+ Agregar al equipo"** y la checklist de primeros pasos.
+- "Soy paciente y no tengo cuenta" → alta por autogestión (DNI + datos; para
+  reclamar una ficha existente, email y teléfono tienen que coincidir).
 - Login `martin.sosa@clavdia.test` / `1357` (médico **sin** admin) → en Sistema
   **no** ve la pestaña Profesionales; `nicolas.ferrari@clavdia.test` / `2580`
-  (profesional fundador) **sí** (toggle Profesional / Secretaría; profesional =
-  elegir el tipo).
+  (profesional fundador) **sí**. En "+ Agregar al equipo" el primer campo es el
+  **DNI**: uno nuevo despliega nombre/email/teléfono/tipo; sin campo de PIN.
 - Mirá los paneles: profesional ve *Consultorio · ahora* + *Mi agenda*; paciente
   ve *Tu turno de hoy* + *Mis turnos* (solo los suyos).
-- Conmutá **Asistente / Sistema** en el encabezado: la vista Sistema muestra el
-  calendario del consultorio + _Consultorio_ + _Profesionales_ (staff), o el
-  calendario + _Mi ficha_ (paciente). La conversación no se pierde al volver.
+- Conmutá **Asistente / Sistema** en el encabezado (se recuerda; la conversación
+  no se pierde al volver).
+- **Vista Sistema, staff**: en *Calendario* entrá a un día y **agendá** un turno
+  (paciente + horario); en *Lista* **cancelá / reprogramá** una fila; en
+  *Pacientes* abrí una ficha y editá alergias o sumá una medicación.
+- **Política de cambios**: entrá como `sofia.paz@clavdia.test` / `3690`, en el
+  panel derecho poné *"¿Quién puede sacar o cambiar turnos?" → Solo recepción y
+  yo*. Ahora entrá como su paciente: los botones **cancelar / reprogramar** de la
+  vista Sistema aparecen bloqueados. Con *< 24 h → Requieren mi aprobación*, el
+  botón crea un **pedido de cambio** que la Dra. Paz ve en *Pedidos de cambio*.
 - Aprobar/rechazar en el panel **no** gasta (va directo a la API).
 
-**Con el agente** (recargá la página al cambiar de usuario; resetea el historial):
+**Con el agente** (recargá la página al cambiar de usuario; resetea el historial).
+"Recepción `1234`", "Dra. Ruiz `2468`", etc. son atajos: el login real es
+`recepcion.belgrano@clavdia.test` / `1234`, `elena.ruiz@clavdia.test` / `2468`, …
+(ver tabla de usuarios sembrados).
 
 | # | Entrás como | Escribí | Esperás |
 | --- | --- | --- | --- |
 | A1 | Recepción `1234` | `Llamó Jorge Fernández, DNI 20.999.888, quiere renovar la receta de Apixabán.` | Busca al paciente, briefing, "⏸ esperando a una persona". Aparece la tarjeta en el panel y en Slack. **Apretá Aprobar** → el chat sigue solo y registra la renovación. |
 | A2 | Recepción | `Una Gómez quiere cancelar su turno de mañana, no sé si María o Mario.` | `askHumanInput` (homónimos). Respondé en el panel. |
-| A3 | Recepción | `Alta de profesional: Dr. Bruno Vega, bruno.vega@clavdia.test, traumatología, consultorio 6, PIN 9090.` | `registerProfessional` → crea profesional + login (por email) + agenda. |
+| A3 | Recepción | `Alta de profesional: Dr. Bruno Vega, DNI 27.111.222, bruno.vega@clavdia.test, tel 11-5555-9090, traumatología, consultorio 6.` | `registerProfessional` (DNI nuevo) → crea profesional + `membership` + agenda, **sin PIN**. Entra con DNI/email + "Olvidé mi PIN". |
 | A4 | Recepción | `Recaudación de hoy del consultorio.` → luego `Cerrá el día.` | `getDailyReport` (total + por profesional) → `closeDay` (guarda + publica en Slack). |
 | B1 | Dra. Ruiz `2468` | (o botón "Iniciar atención") `Que pase el que sigue.` | `startAttention`; Mario Gómez 🎂 queda "en atención". |
 | B2 | Dra. Ruiz | `Se me complicó con Mario, avisá que me atraso unos 20 minutos.` | `warnDelay` → aviso tentativo a María y Jorge. |
@@ -581,22 +726,36 @@ src/
 ├── app/
 │   ├── page.tsx                     server: valida la sesión → /login o <ChatApp>
 │   ├── chat-app.tsx                 cliente: encabezado + conmutador de vista; vista Asistente (chat + paneles)
-│   ├── system-view.tsx              cliente: vista Sistema (calendario + fichas, sin IA)
-│   ├── login/page.tsx               email + PIN, picker de consultorio, alta de paciente, wizard de alta de consultorio
+│   ├── system-view.tsx              cliente: shell de la vista Sistema (pestañas, panel lateral, pedidos de cambio)
+│   ├── system-calendar.tsx          cliente: calendario mensual + reserva/cancelación/reprogramación
+│   ├── system-patients.tsx          cliente: buscador de pacientes + edición de ficha + medicación
+│   ├── system-shared.tsx            cliente: CalRow (acciones por turno), PatientPicker, SlotPicker, helpers
+│   ├── login/page.tsx               (email|DNI)+PIN, picker de consultorio, "Olvidé mi PIN", alta de paciente, wizard de consultorio
 │   ├── globals.css                  tokens de diseño (Tailwind v4 @theme)
 │   └── api/
 │       ├── chat/route.ts            start(secretaryWorkflow, [messages, actor]) + stream SSE
 │       ├── approvals/route.ts       GET pendientes (scope por rol) · POST decisión → resumeHook
 │       ├── slack/actions/route.ts   webhook de Slack (firma verificada) → resumeHook
-│       ├── agenda/route.ts          estado vivo de la agenda (role-aware)
-│       ├── calendar/route.ts        mini-calendario de la vista Asistente (role-aware)
-│       ├── system/route.ts          datos de la vista Sistema (calendario org-wide + fichas)
-│       ├── patients/route.ts        alta de paciente por autogestión (ficha + login por email + join a un consultorio)
-│       ├── organizations/route.ts   GET lista pública · POST wizard self-serve (org + usuario fundador, secretaría o profesional)
-│       ├── professionals/route.ts   POST alta de profesional en el consultorio activo (solo canAdmin)
-│       └── auth/{login,logout,me,switch-org}/route.ts
+│       ├── agenda/route.ts          estado vivo de la agenda — vista Asistente (role-aware)
+│       ├── calendar/route.ts        mini-calendario — vista Asistente (role-aware)
+│       ├── system/route.ts          datos de la vista Sistema (agenda org-wide + fichas + pedidos de cambio)
+│       ├── calendar-grid/route.ts   conteos por día del calendario mensual + turnos/huecos de un día
+│       ├── appointments/route.ts            POST: agendar (agente y manual comparten scheduling.ts)
+│       ├── appointments/[id]/route.ts       PATCH reprogramar · DELETE cancelar (o crea pedido de cambio)
+│       ├── appointment-changes/route.ts     GET pendientes · POST aprobar/rechazar un cambio de turno
+│       ├── slots/route.ts           huecos libres para los pickers de reserva/reprogramación
+│       ├── providers/settings/route.ts      GET/PATCH la política de cambios del profesional
+│       ├── patients/route.ts        alta de paciente (staff DNI-first + ensurePatientLogin; o autogestión con verificación email+tel)
+│       ├── patients/search/route.ts         lista/búsqueda de pacientes del consultorio (staff)
+│       ├── patients/[id]/route.ts            GET/PATCH la ficha (scope por rol/consultorio)
+│       ├── patients/[id]/medications/[...]   POST/DELETE medicación de la ficha
+│       ├── organizations/route.ts   GET lista pública · POST wizard self-serve (org + usuario fundador)
+│       ├── professionals/route.ts   POST alta de profesional o secretaría (DNI-first, sin PIN; solo canAdmin)
+│       └── auth/
+│           ├── {login,logout,me,switch-org}/route.ts   login por email|DNI, sesión
+│           └── pin-reset/{request,confirm}/route.ts     código de un solo uso → PIN nuevo
 ├── workflows/secretary/
-│   ├── workflow.ts                  "use workflow": DurableAgent, instrucciones + activeTools + Actor por rol
+│   ├── workflow.ts                  "use workflow": DurableAgent, prompt cacheado, maxSteps, contabilidad por step
 │   ├── tools.ts                     todas las tools ("use step") + TOOLS_BY_ROLE
 │   ├── hooks.ts                     defineHook<HumanResponse>()
 │   └── request-human.ts             notifyHuman / await hook / finalizeHuman
@@ -605,12 +764,18 @@ src/
     │   ├── instructions.md          comportamiento base (texto plano)
     │   ├── instructions.ts          lo lee en un "use step" (base + roles/<role>.md)
     │   └── roles/{medico,recepcion,paciente}.md
-    ├── auth/{pin.ts,session.ts,actor.ts}   scrypt + cookie HMAC + hidratación del Actor (membership → activeOrg)
+    ├── auth/{pin.ts,session.ts,actor.ts}   scrypt (PIN + código de recuperación) + cookie HMAC (AUTH_SECRET fuerte en prod) + hidratación del Actor
     ├── db/
-    │   ├── schema.ts migrate.ts connection.ts seed.ts slots.ts   SQLite (better-sqlite3), multi-tenant, DB persistente
-    │   └── repo.ts                  todas las queries tipadas (scope por organización)
-    ├── domain/{types.ts,briefing.ts,clock.ts}
+    │   ├── connection.ts             singleton postgres.js (pooled, prepare:false)
+    │   ├── migrate.ts migrations/*.sql   runner de migraciones versionadas
+    │   ├── seed.ts slots.ts          datos de ejemplo (async, sql.begin transacción)
+    │   └── repo.ts                  todas las queries tipadas y async (scope por organización)
+    ├── domain/
+    │   ├── {types.ts,briefing.ts,clock.ts,specialties.ts}
+    │   ├── scheduling.ts            reservar / cancelar / reprogramar + refresco de avisos (agente + REST)
+    │   └── appointment-view.ts      manageFlags (qué puede hacer el actor a mano) + vista de pedidos de cambio
     ├── approvals/{types.ts,registry.ts}   la fila pending_requests
+    ├── notify/index.ts                    envío de códigos (transporte pluggable: log · resend · twilio)
     └── slack/{client.ts,blocks.ts}        Block Kit + verificación de firma
 ```
 
@@ -633,6 +798,26 @@ src/
   de error.
 - **El scoping de datos del paciente se fuerza en el servidor** (`scopePatientId`),
   no se confía en el prompt.
+- **Una sola implementación de agendado, dos entradas.** El agente (`tools.ts`) y
+  los endpoints REST de la vista Sistema llaman al mismo `scheduling.ts`; la
+  autorización queda afuera, en cada caller. La vista sin IA no es una maqueta:
+  hace las mismas mutaciones que el chat.
+- **La política de cambios vive en los datos** (`provider_settings`), no en el
+  prompt: cada profesional decide si el paciente puede autogestionar turnos y qué
+  pasa con los cambios de último momento. Vale para el chat y para la vista
+  Sistema.
+- **Prompt caching deliberado.** System prompt + tools como prefijo cacheado a 1 h
+  (el workflow puede quedar suspendido mucho rato); cola de conversación con
+  breakpoint de 5 min para no re-facturar el historial en cada tool round-trip.
+  `onStepFinish` mide tokens por consultorio.
+- **Fail-closed en auth de producción.** Sin `AUTH_SECRET` fuerte la app no
+  arranca, en vez de correr con una clave conocida.
+- **Identidad anclada en el DNI, PINs que nadie reparte.** El alta de una persona
+  ya conocida es solo el DNI (sin re-tipear datos ni crear duplicados); el PIN lo
+  elige la propia persona con "Olvidé mi PIN" (código de un solo uso al canal que
+  ya está en su ficha). Un staff nunca conoce ni dicta el PIN de otro. El envío es
+  un módulo aparte (`src/lib/notify`) con transporte pluggable — cambiar de la
+  consola a Resend/Twilio no toca el resto del código.
 - **Reloj simulado por profesional.** No hay "now" real durante una consulta en el
   demo; el reloj lo mueve el profesional al marcar inicio/fin. En producción, un
   workflow durable con `sleep()` haría el cierre del día y detectaría demoras.
@@ -641,9 +826,13 @@ src/
 
 | Demo | Producción |
 | --- | --- |
-| SQLite local, re-sembrada en cada arranque | Postgres/Turso (reemplazar `repo.ts` + `connection.ts`) |
-| Login usuario + PIN + cookie HMAC | OAuth/SSO, rotación, MFA, rate-limiting |
+| Postgres (Supabase) ya en dev/test; prod en el tier free | Upgradear el proyecto de prod antes del launch (los free se pausan por inactividad) |
+| Web corriendo local (`npm run dev`) | Elegir hosting (Vercel u otro) y wirear `DATABASE_URL`/`DATABASE_URL_DIRECT` por entorno |
+| Login (email\|DNI) + PIN + cookie HMAC (`AUTH_SECRET` fuerte y cookie `Secure` en prod) | OAuth/SSO, rotación, MFA, rate-limiting por IP |
+| Recuperación de PIN por código de 6 dígitos; transporte `log` (consola) por default | Provider real (Resend / Twilio WhatsApp) vía `NOTIFY_TRANSPORT`; rate-limit y captcha en `request` |
+| Reclamo de ficha existente verificando que email + teléfono coincidan con la ficha | Verificación real del canal (link / OTP), no "coincide con lo cargado" |
 | "Hoy" y la agenda se anclan a la hora del arranque; el reloj lo mueve el profesional | Reloj real + workflow `sleep()` para el cierre del día y la detección automática de demoras |
+| Contabilidad de tokens a `console.info` | Métrica agregada por consultorio → billing / límites |
 | Datos de paciente ficticios | Historia clínica real: auditoría, cifrado en reposo, RBAC fino, HIPAA/HDS |
 | Túnel `trycloudflare` para Slack | Deploy en Vercel con URL estable |
 

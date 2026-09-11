@@ -19,12 +19,12 @@ export interface ManageFlags {
 }
 
 /** What the caller may do to `appt` from the manual UI. */
-export function manageFlags(actor: Actor, appt: Appointment): ManageFlags {
+export async function manageFlags(actor: Actor, appt: Appointment): Promise<ManageFlags> {
   const off: ManageFlags = { canCancel: false, canReschedule: false, needsApproval: false, blockedReason: null };
   if (appt.status !== "scheduled") return off;
   if (Date.parse(appt.start) <= Date.now()) return off;
 
-  const settings = getProviderSettings(appt.providerId);
+  const settings = await getProviderSettings(appt.providerId);
 
   if (actor.role === "paciente") {
     if (settings.whoCanChange === "staff_only") {
@@ -44,13 +44,17 @@ export function manageFlags(actor: Actor, appt: Appointment): ManageFlags {
   return { canCancel: true, canReschedule: true, needsApproval: false, blockedReason: null };
 }
 
-export function changeRequestView(r: AppointmentChangeRequest) {
-  const appt = getAppointment(r.appointmentId);
+export async function changeRequestView(r: AppointmentChangeRequest) {
+  const [appt, patient, provider] = await Promise.all([
+    getAppointment(r.appointmentId),
+    getPatient(r.patientId),
+    getProvider(r.providerId),
+  ]);
   return {
     id: r.id,
     kind: r.kind,
-    patientName: getPatient(r.patientId)?.fullName ?? r.patientId,
-    providerName: getProvider(r.providerId)?.name ?? r.providerId,
+    patientName: patient?.fullName ?? r.patientId,
+    providerName: provider?.name ?? r.providerId,
     reason: r.reason,
     requestedBy: r.requestedBy,
     createdAt: r.createdAt,

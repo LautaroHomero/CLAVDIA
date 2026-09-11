@@ -6,6 +6,7 @@ import {
   addMembership,
   cancelAppointmentById,
   createPatient,
+  ensurePatientLogin,
   createPrescriptionRequest,
   createProfessional,
   createUser,
@@ -20,7 +21,7 @@ import {
   getPatientByDni,
   getProvider,
   getSavedDailyReport,
-  getUserByEmail,
+  getUserByDni,
   inProgressAppointment,
   joinPatientOrg,
   listAppointments,
@@ -55,7 +56,6 @@ import {
   refreshWaitingNotices,
   rescheduleAppointment as rescheduleAppointmentSvc,
 } from "@/lib/domain/scheduling";
-import { hashPin } from "@/lib/auth/pin";
 import { postText as postSlackText } from "@/lib/slack/client";
 import { DEMO_TODAY, DEMO_TOMORROW } from "@/lib/domain/clock";
 import type { Actor, OrgRef, Role } from "@/lib/domain/types";
@@ -83,15 +83,16 @@ function scopePatientId(ctx: ToolCtx, requested: string): string {
 }
 
 /** Resolve which provider (in the staff's active org) a pricing/report tool targets. */
-function resolveProviderId(ctx: ToolCtx, ref?: string): string | { error: string } {
+async function resolveProviderId(ctx: ToolCtx, ref?: string): Promise<string | { error: string }> {
   const actor = actorOf(ctx);
   if (actor?.role === "medico" && actor.activeOrg?.providerId) return actor.activeOrg.providerId;
   const orgId = staffOrgId(ctx);
   if (!orgId) return { error: "Sin organización activa." };
   if (!ref) return { error: "Indicá de qué profesional se trata (nombre o especialidad)." };
-  if (ref.startsWith("prov_") && getProvider(ref)?.organizationId === orgId) return ref;
+  if (ref.startsWith("prov_") && (await getProvider(ref))?.organizationId === orgId) return ref;
   const n = ref.trim().toLowerCase();
-  const hit = listProviders(orgId).find(
+  const providers = await listProviders(orgId);
+  const hit = providers.find(
     (p) =>
       p.name.toLowerCase().includes(n) || n.includes(p.name.toLowerCase()) || p.specialty.toLowerCase().includes(n),
   );
@@ -119,8 +120,9 @@ function resolvePatientOrg(ctx: ToolCtx, ref?: string): OrgRef | { error: string
 
 async function listOrganizationsStep() {
   "use step";
+  const orgs = await listOrganizations();
   return {
-    organizations: listOrganizations().map((o) => ({ id: o.id, name: o.name, address: o.address })),
+    organizations: orgs.map((o) => ({ id: o.id, name: o.name, address: o.address })),
     note: "Para atenderte en uno nuevo, usá joinOrganization con el nombre.",
   };
 }
@@ -132,19 +134,20 @@ async function joinOrganizationStep({ organization }: { organization: string }, 
     return { ok: false, error: "Solo un paciente puede sumarse a un consultorio." };
   }
   const n = organization.trim().toLowerCase();
-  const org = listOrganizations().find(
+  const orgs = await listOrganizations();
+  const org = orgs.find(
     (o) => o.name.toLowerCase().includes(n) || n.includes(o.name.toLowerCase()) || o.id === organization,
   );
   if (!org) {
     return {
       ok: false,
-      error: `No encontré "${organization}". Opciones: ${listOrganizations().map((o) => o.name).join(", ")}.`,
+      error: `No encontré "${organization}". Opciones: ${orgs.map((o) => o.name).join(", ")}.`,
     };
   }
-  if (patientInOrg(actor.patientId, org.id)) {
+  if (await patientInOrg(actor.patientId, org.id)) {
     return { ok: true, message: `Ya estabas registrado en ${org.name}.` };
   }
-  joinPatientOrg(actor.patientId, org.id);
+  await joinPatientOrg(actor.patientId, org.id);
   return { ok: true, organizationId: org.id, message: `Listo, ahora también te atendés en ${org.name}.` };
 }
 
@@ -170,14 +173,14 @@ async function clinicInfoStep({ organization }: { organization?: string }, ctx: 
     orgId = staffOrgId(ctx);
   }
   if (!orgId) return { ok: false, error: "Sin organización." };
-  const org = getOrganization(orgId)!;
+  const [org, providers] = await Promise.all([getOrganization(orgId), listProviders(orgId)]);
   return {
     ok: true,
-    name: org.name,
-    address: org.address,
-    hours: org.hours,
-    phone: org.phone,
-    providers: listProviders(orgId).map((p) => ({ id: p.id, name: p.name, specialty: p.specialty })),
+    name: org!.name,
+    address: org!.address,
+    hours: org!.hours,
+    phone: org!.phone,
+    providers: providers.map((p) => ({ id: p.id, name: p.name, specialty: p.specialty })),
     prep: {
       laboratorio: "Ayuno de 8 horas. Se puede tomar agua.",
       resonancia: "Traer estudios previos. Avisar si tiene marcapasos o prótesis metálicas.",
@@ -196,12 +199,12 @@ async function registerPatientStep(
     email,
     reason,
   }: {
-    fullName: string;
+    fullName?: string;
     dni: string;
-    dateOfBirth: string;
-    coverage: string;
-    phone: string;
-    email: string;
+    dateOfBirth?: string;
+    coverage?: string;
+    phone?: string;
+    email?: string;
     reason?: string;
   },
   ctx: ToolCtx,
@@ -210,51 +213,76 @@ async function registerPatientStep(
   const orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización activa." };
   const orgName = actorOf(ctx)?.activeOrg?.name ?? "este consultorio";
+  if (!dni?.trim()) return { ok: false, error: "Indicá el DNI del paciente." };
 
+  // Already in the system → DNI is enough, just link to this org.
+  const existing = await getPatientByDni(dni);
+  if (existing) {
+    await joinPatientOrg(existing.id, orgId);
+    await ensurePatientLogin({
+      patientId: existing.id,
+      name: existing.fullName,
+      email: existing.email,
+      dni: existing.dni,
+      phone: existing.phone,
+    });
+    return {
+      ok: true,
+      patientId: existing.id,
+      alreadyExisted: true,
+      message: `${existing.fullName} (DNI ${existing.dni}) ya estaba en el sistema; lo/la sumé a ${orgName}.`,
+    };
+  }
+
+  // New patient → full data required.
   const mail = (email ?? "").trim().toLowerCase();
+  if (!fullName?.trim() || !dateOfBirth?.trim() || !coverage?.trim()) {
+    return { ok: false, error: "Paciente nuevo: pedí nombre, fecha de nacimiento (AAAA-MM-DD) y cobertura." };
+  }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
-    return { ok: false, error: "Pedí un email válido: es lo que usa el paciente para activar su portal." };
+    return { ok: false, error: "Pedí un email válido: es lo que usa el paciente para recuperar su PIN." };
   }
   if ((phone ?? "").replace(/\D/g, "").length < 8) {
     return { ok: false, error: "Pedí un teléfono válido para el paciente." };
   }
 
-  const existing = getPatientByDni(dni);
-  if (existing) {
-    joinPatientOrg(existing.id, orgId);
-    return {
-      ok: true,
-      patientId: existing.id,
-      alreadyExisted: true,
-      message: `${existing.fullName} (DNI ${dni}) ya tenía ficha; lo/la sumé a ${orgName}.`,
-    };
-  }
-  const patient = createPatient({ fullName, dni, dateOfBirth, coverage, phone, email: mail, notes: reason });
-  joinPatientOrg(patient.id, orgId);
+  const patient = await createPatient({
+    fullName,
+    dni,
+    dateOfBirth,
+    coverage,
+    phone,
+    email: mail,
+    notes: reason,
+  });
+  await joinPatientOrg(patient.id, orgId);
+  await ensurePatientLogin({ patientId: patient.id, name: fullName, email: mail, dni, phone: phone! });
   return {
     ok: true,
     patientId: patient.id,
     fullName: patient.fullName,
     dni: patient.dni,
-    message: `Paciente dado de alta en ${orgName}. Para entrar al portal, activa su acceso desde la pantalla de ingreso con su DNI, email y teléfono.`,
+    message: `Paciente dado de alta en ${orgName}. Ya puede entrar: con su DNI o email y "Olvidé mi PIN" elige su PIN.`,
   };
 }
 
 async function registerProfessionalStep(
   {
     role,
+    dni,
     fullName,
     email,
+    phone,
     specialty,
     roomLabel,
-    pin,
   }: {
     role?: "medico" | "recepcion";
-    fullName: string;
-    email: string;
+    dni: string;
+    fullName?: string;
+    email?: string;
+    phone?: string;
     specialty?: string;
     roomLabel?: string;
-    pin: string;
   },
   ctx: ToolCtx,
 ) {
@@ -264,49 +292,90 @@ async function registerProfessionalStep(
   }
   const orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización activa." };
+  if (!dni?.trim()) return { ok: false, error: "Indicá el DNI de la persona." };
   const kind = role === "recepcion" ? "recepcion" : "medico";
-  const mail = (email ?? "").trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
-    return { ok: false, error: "Pedí un email válido para el acceso." };
-  }
-  if (!/^\d{4}$/.test(pin ?? "")) {
-    return { ok: false, error: "Pedí un PIN de 4 dígitos." };
-  }
+  const existing = await getUserByDni(dni);
 
   if (kind === "recepcion") {
-    const { hash, salt } = hashPin(pin);
-    const existing = getUserByEmail(mail);
-    if (existing && existing.role !== "recepcion") {
-      return { ok: false, error: "Ya hay una cuenta con ese email y otro rol." };
+    if (existing) {
+      await addMembership({ userId: existing.id, organizationId: orgId, role: "recepcion", canAdmin: true });
+      return {
+        ok: true,
+        role: "recepcion",
+        name: existing.name,
+        message: `${existing.name} ya estaba en el sistema; ahora también es secretaría de este consultorio.`,
+      };
     }
-    const userId = existing?.id ?? createUser({ name: fullName, email: mail, role: "recepcion", pinHash: hash, pinSalt: salt }).id;
-    addMembership({ userId, organizationId: orgId, role: "recepcion", canAdmin: true });
+    const mail = (email ?? "").trim().toLowerCase();
+    if (!fullName?.trim()) return { ok: false, error: "Persona nueva: pedí el nombre." };
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
+      return { ok: false, error: "Persona nueva: pedí un email válido (le sirve para recuperar el PIN)." };
+    }
+    if ((phone ?? "").replace(/\D/g, "").length < 8) {
+      return { ok: false, error: "Persona nueva: pedí un teléfono válido." };
+    }
+    const userId = (
+      await createUser({
+        name: fullName,
+        email: mail,
+        role: "recepcion",
+        pinHash: "",
+        pinSalt: "",
+        dni,
+        phone,
+      })
+    ).id;
+    await addMembership({ userId, organizationId: orgId, role: "recepcion", canAdmin: true });
     return {
       ok: true,
       role: "recepcion",
       name: fullName,
-      access: existing ? { email: mail, pin: "el que ya usa" } : { email: mail, pin },
-      message: existing
-        ? "Esa persona ya tenía cuenta; ahora también es secretaría de este consultorio."
-        : "Secretaría administrativa dada de alta. Pasale su email y PIN para que ingrese.",
+      message: `Secretaría dada de alta. Entra con su DNI o email y "Olvidé mi PIN" para elegir su PIN.`,
     };
   }
 
+  // kind === "medico"
+  if (existing) {
+    const { provider } = await createProfessional({
+      organizationId: orgId,
+      name: existing.name,
+      email: existing.email,
+      dni: existing.dni || dni,
+      phone: existing.phone,
+      specialty: (specialty ?? "").trim() || "A confirmar",
+      roomLabel: roomLabel?.trim() || "A confirmar",
+    });
+    return {
+      ok: true,
+      role: "medico",
+      providerId: provider.id,
+      name: provider.name,
+      message: `${existing.name} ya estaba en el sistema; lo/la sumé a este consultorio con agenda propia.`,
+    };
+  }
+
+  const mail = (email ?? "").trim().toLowerCase();
+  if (!fullName?.trim()) return { ok: false, error: "Profesional nuevo: pedí el nombre." };
   if (!specialty?.trim()) {
     return { ok: false, error: "Indicá el tipo de profesional (especialidad / profesión)." };
   }
-  if (providerNameTakenInOrg(orgId, fullName)) {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
+    return { ok: false, error: "Profesional nuevo: pedí un email válido (le sirve para recuperar el PIN)." };
+  }
+  if ((phone ?? "").replace(/\D/g, "").length < 8) {
+    return { ok: false, error: "Profesional nuevo: pedí un teléfono válido." };
+  }
+  if (await providerNameTakenInOrg(orgId, fullName)) {
     return { ok: false, error: `Ya hay un profesional llamado "${fullName}" en este consultorio.` };
   }
-  const { hash, salt } = hashPin(pin);
-  const { provider, reusedUser } = createProfessional({
+  const { provider } = await createProfessional({
     organizationId: orgId,
     name: fullName,
     email: mail,
+    dni,
+    phone,
     specialty: specialty.trim(),
     roomLabel: roomLabel?.trim() || "A confirmar",
-    pinHash: hash,
-    pinSalt: salt,
   });
   return {
     ok: true,
@@ -315,12 +384,7 @@ async function registerProfessionalStep(
     name: provider.name,
     specialty: provider.specialty,
     roomLabel: provider.roomLabel,
-    access: reusedUser
-      ? { email: mail, pin: "el que ya usa (ya tenía cuenta)" }
-      : { email: mail, pin },
-    message: reusedUser
-      ? "El profesional ya tenía cuenta; lo sumé a este consultorio con agenda propia."
-      : "Profesional dado de alta con agenda disponible. Pasale su email y PIN para que ingrese.",
+    message: `Profesional dado de alta con agenda. Entra con su DNI o email y "Olvidé mi PIN" para elegir su PIN.`,
   };
 }
 
@@ -328,7 +392,7 @@ async function findPatientStep({ query }: { query: string }, ctx: ToolCtx) {
   "use step";
   const orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización activa." };
-  const matches = searchPatients(orgId, query);
+  const matches = await searchPatients(orgId, query);
   return {
     count: matches.length,
     matches: matches.map((p) => ({
@@ -346,7 +410,7 @@ async function patientBriefingStep({ patientId }: { patientId: string }, ctx: To
   const actor = actorOf(ctx);
   const pid = scopePatientId(ctx, patientId);
   const orgId = actor?.role === "paciente" ? undefined : staffOrgId(ctx);
-  if (actor?.role !== "paciente" && orgId && !patientInOrg(pid, orgId)) {
+  if (actor?.role !== "paciente" && orgId && !(await patientInOrg(pid, orgId))) {
     return { found: false, summary: "Ese paciente no está registrado en este consultorio." };
   }
   return buildPatientBriefing(pid, orgId);
@@ -366,13 +430,11 @@ async function availableSlotsStep(
   } else orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización." };
 
-  const slots = listOpenSlots(orgId, { date, providerId }).slice(0, 20);
-  return {
-    today: DEMO_TODAY,
-    organization: getOrganization(orgId)?.name,
-    count: slots.length,
-    slots: slots.map((s) => {
-      const provider = getProvider(s.providerId);
+  const [slotsAll, org] = await Promise.all([listOpenSlots(orgId, { date, providerId }), getOrganization(orgId)]);
+  const slots = slotsAll.slice(0, 20);
+  const slotViews = await Promise.all(
+    slots.map(async (s) => {
+      const provider = await getProvider(s.providerId);
       return {
         slotId: s.id,
         start: s.start.replace("T", " "),
@@ -381,6 +443,12 @@ async function availableSlotsStep(
         specialty: provider?.specialty,
       };
     }),
+  );
+  return {
+    today: DEMO_TODAY,
+    organization: org?.name,
+    count: slots.length,
+    slots: slotViews,
   };
 }
 
@@ -389,8 +457,34 @@ async function myAgendaStep({ date }: { date?: string }, ctx: ToolCtx) {
   const orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización activa." };
   const providerId = staffProviderId(ctx);
-  const appts = listAppointments(orgId, { providerId, date });
-  const prov = providerId ? getProvider(providerId) : undefined;
+  const [appts, prov] = await Promise.all([
+    listAppointments(orgId, { providerId, date }),
+    providerId ? getProvider(providerId) : Promise.resolve(undefined),
+  ]);
+  const appointments = await Promise.all(
+    appts.map(async (a) => {
+      const [patient, pendingLabsAll, invoicesAll, provider] = await Promise.all([
+        getPatient(a.patientId),
+        getLabResultsForPatient(a.patientId, orgId),
+        getInvoicesForPatient(a.patientId, orgId),
+        getProvider(a.providerId),
+      ]);
+      const pendingLabs = pendingLabsAll.filter((l) => l.status === "pending-review");
+      const unpaid = invoicesAll.filter((i) => i.status === "unpaid");
+      return {
+        appointmentId: a.id,
+        start: a.start.replace("T", " "),
+        patient: patient?.fullName ?? a.patientId,
+        patientDni: patient?.dni,
+        reason: a.reason,
+        provider: provider?.name,
+        flags: [
+          ...pendingLabs.map((l) => `Resultado pendiente: ${l.panel}`),
+          ...unpaid.map((i) => `Factura impaga: ${i.concept} (${ars(i.amount)})`),
+        ],
+      };
+    }),
+  );
   return {
     today: DEMO_TODAY,
     tomorrow: DEMO_TOMORROW,
@@ -398,29 +492,13 @@ async function myAgendaStep({ date }: { date?: string }, ctx: ToolCtx) {
     queriedDate: date ?? "todas las fechas",
     count: appts.length,
     scope: prov ? `${prov.name} · ${prov.specialty}` : "todo el consultorio",
-    appointments: appts.map((a) => {
-      const patient = getPatient(a.patientId);
-      const pendingLabs = getLabResultsForPatient(a.patientId, orgId).filter((l) => l.status === "pending-review");
-      const unpaid = getInvoicesForPatient(a.patientId, orgId).filter((i) => i.status === "unpaid");
-      return {
-        appointmentId: a.id,
-        start: a.start.replace("T", " "),
-        patient: patient?.fullName ?? a.patientId,
-        patientDni: patient?.dni,
-        reason: a.reason,
-        provider: getProvider(a.providerId)?.name,
-        flags: [
-          ...pendingLabs.map((l) => `Resultado pendiente: ${l.panel}`),
-          ...unpaid.map((i) => `Factura impaga: ${i.concept} (${ars(i.amount)})`),
-        ],
-      };
-    }),
+    appointments,
   };
 }
 
 async function pendingApprovalsStep(_input: unknown, ctx: ToolCtx) {
   "use step";
-  const items = listPendingRequests(staffOrgId(ctx));
+  const items = await listPendingRequests(staffOrgId(ctx));
   return {
     count: items.length,
     note: "La decisión se toma desde el panel o desde Slack, no desde el chat.",
@@ -461,19 +539,20 @@ async function scheduleAppointmentStep(
   if (!orgId) return { ok: false, error: "Sin organización." };
 
   const pid = scopePatientId(ctx, patientId);
-  if (!getPatient(pid)) return { ok: false, error: `Paciente ${pid} no existe.` };
-  if (!patientInOrg(pid, orgId)) {
-    if (actor?.role === "paciente") joinPatientOrg(pid, orgId);
+  if (!(await getPatient(pid))) return { ok: false, error: `Paciente ${pid} no existe.` };
+  if (!(await patientInOrg(pid, orgId))) {
+    if (actor?.role === "paciente") await joinPatientOrg(pid, orgId);
     else return { ok: false, error: "Ese paciente no está registrado en este consultorio." };
   }
-  const res = bookAppointment({ organizationId: orgId, patientId: pid, slotId, reason });
+  const res = await bookAppointment({ organizationId: orgId, patientId: pid, slotId, reason });
   if (!res.ok) return res;
+  const [org, provider] = await Promise.all([getOrganization(orgId), getProvider(res.appointment.providerId)]);
   return {
     ok: true,
     appointmentId: res.appointment.id,
     start: res.appointment.start.replace("T", " "),
-    organization: getOrganization(orgId)?.name,
-    provider: getProvider(res.appointment.providerId)?.name,
+    organization: org?.name,
+    provider: provider?.name,
     reason: res.appointment.reason,
     price: res.price,
   };
@@ -482,7 +561,7 @@ async function scheduleAppointmentStep(
 async function cancelAppointmentStep({ appointmentId }: { appointmentId: string; reason: string }, ctx: ToolCtx) {
   "use step";
   const actor = actorOf(ctx);
-  const existing = getAppointment(appointmentId);
+  const existing = await getAppointment(appointmentId);
   if (!existing) return { ok: false, error: `El turno ${appointmentId} no existe.` };
   if (actor?.role === "paciente" && actor.patientId && existing.patientId !== actor.patientId) {
     return { ok: false, error: "Ese turno no pertenece a tu ficha." };
@@ -492,7 +571,7 @@ async function cancelAppointmentStep({ appointmentId }: { appointmentId: string;
   }
   if (existing.status !== "scheduled")
     return { ok: false, error: `El turno ${appointmentId} está ${existing.status}.` };
-  const res = cancelAppointmentSvc(appointmentId);
+  const res = await cancelAppointmentSvc(appointmentId);
   if (!res.ok) return res;
   return {
     ok: true,
@@ -508,7 +587,7 @@ async function rescheduleAppointmentStep(
 ) {
   "use step";
   const actor = actorOf(ctx);
-  const existing = getAppointment(appointmentId);
+  const existing = await getAppointment(appointmentId);
   if (!existing) return { ok: false, error: `El turno ${appointmentId} no existe.` };
   if (actor?.role === "paciente" && actor.patientId && existing.patientId !== actor.patientId) {
     return { ok: false, error: "Ese turno no pertenece a tu ficha." };
@@ -516,7 +595,7 @@ async function rescheduleAppointmentStep(
   if (actor?.role !== "paciente" && staffOrgId(ctx) !== existing.organizationId) {
     return { ok: false, error: "Ese turno es de otro consultorio." };
   }
-  const res = rescheduleAppointmentSvc(appointmentId, newSlotId);
+  const res = await rescheduleAppointmentSvc(appointmentId, newSlotId);
   if (!res.ok) return res;
   return {
     ok: true,
@@ -539,8 +618,8 @@ async function prescriptionRenewalStep(
   "use step";
   const orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización activa." };
-  if (!getPatient(patientId)) return { ok: false, error: `Paciente ${patientId} no existe.` };
-  const req = createPrescriptionRequest({
+  if (!(await getPatient(patientId))) return { ok: false, error: `Paciente ${patientId} no existe.` };
+  const req = await createPrescriptionRequest({
     organizationId: orgId,
     patientId,
     medication,
@@ -558,8 +637,8 @@ async function sendPatientMessageStep(
   "use step";
   const orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización activa." };
-  if (!getPatient(patientId)) return { ok: false, error: `Paciente ${patientId} no existe.` };
-  const msg = recordPatientMessage(orgId, patientId, message);
+  if (!(await getPatient(patientId))) return { ok: false, error: `Paciente ${patientId} no existe.` };
+  const msg = await recordPatientMessage(orgId, patientId, message);
   return { ok: true, messageId: msg.id, sentAt: msg.sentAt };
 }
 
@@ -568,13 +647,13 @@ async function refundInvoiceStep(
   ctx: ToolCtx,
 ) {
   "use step";
-  const inv = getInvoice(invoiceId);
+  const inv = await getInvoice(invoiceId);
   if (!inv) return { ok: false, error: `La factura ${invoiceId} no existe.` };
   if (staffOrgId(ctx) !== inv.organizationId) {
     return { ok: false, error: "Esa factura es de otro consultorio." };
   }
   try {
-    const done = refundInvoiceInDb(invoiceId);
+    const done = await refundInvoiceInDb(invoiceId);
     return { ok: true, invoiceId: done.id, status: done.status, amount: done.amount, approvedBy };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -587,26 +666,27 @@ async function refundInvoiceStep(
 
 async function listPricesStep({ provider }: { provider?: string }, ctx: ToolCtx) {
   "use step";
-  const pid = resolveProviderId(ctx, provider);
+  const pid = await resolveProviderId(ctx, provider);
   if (typeof pid !== "string") return { ok: false, error: pid.error };
-  const p = getProvider(pid)!;
+  const [p, prices] = await Promise.all([getProvider(pid), listProviderPrices(pid)]);
   return {
     ok: true,
     providerId: pid,
-    professional: p.name,
-    specialty: p.specialty,
-    consultaEstandar: p.defaultFee,
-    practicas: listProviderPrices(pid).map((i) => ({ label: i.label, amount: i.amount })),
+    professional: p!.name,
+    specialty: p!.specialty,
+    consultaEstandar: p!.defaultFee,
+    practicas: prices.map((i) => ({ label: i.label, amount: i.amount })),
   };
 }
 
 async function setConsultationFeeStep({ provider, amount }: { provider?: string; amount: number }, ctx: ToolCtx) {
   "use step";
-  const pid = resolveProviderId(ctx, provider);
+  const pid = await resolveProviderId(ctx, provider);
   if (typeof pid !== "string") return { ok: false, error: pid.error };
   if (!Number.isFinite(amount) || amount <= 0) return { ok: false, error: "Importe inválido." };
-  setProviderFee(pid, amount);
-  return { ok: true, professional: getProvider(pid)!.name, consultaEstandar: Math.round(amount) };
+  await setProviderFee(pid, amount);
+  const p = await getProvider(pid);
+  return { ok: true, professional: p!.name, consultaEstandar: Math.round(amount) };
 }
 
 async function addPriceItemStep(
@@ -614,18 +694,18 @@ async function addPriceItemStep(
   ctx: ToolCtx,
 ) {
   "use step";
-  const pid = resolveProviderId(ctx, provider);
+  const pid = await resolveProviderId(ctx, provider);
   if (typeof pid !== "string") return { ok: false, error: pid.error };
   if (!label?.trim()) return { ok: false, error: "Falta el nombre de la práctica." };
   if (!Number.isFinite(amount) || amount <= 0) return { ok: false, error: "Importe inválido." };
-  const orgId = getProvider(pid)!.organizationId;
-  const item = addProviderPrice(orgId, pid, label, amount);
-  return { ok: true, professional: getProvider(pid)!.name, added: item };
+  const p = await getProvider(pid);
+  const item = await addProviderPrice(p!.organizationId, pid, label, amount);
+  return { ok: true, professional: p!.name, added: item };
 }
 
 async function markAttendedStep({ appointmentId }: { appointmentId: string }, ctx: ToolCtx) {
   "use step";
-  const apt = getAppointment(appointmentId);
+  const apt = await getAppointment(appointmentId);
   if (!apt) return { ok: false, error: `El turno ${appointmentId} no existe.` };
   const actor = actorOf(ctx);
   if (actor?.role !== "paciente" && staffOrgId(ctx) !== apt.organizationId) {
@@ -635,9 +715,9 @@ async function markAttendedStep({ appointmentId }: { appointmentId: string }, ct
     return { ok: false, error: "Ese turno no es de tu agenda." };
   }
   if (apt.status === "cancelled") return { ok: false, error: "El turno está cancelado." };
-  setAppointmentStatus(appointmentId, "completed");
-  const price = apt.price || priceForReason(apt.providerId, apt.reason);
-  if (!apt.price) setAppointmentPrice(appointmentId, price);
+  await setAppointmentStatus(appointmentId, "completed");
+  const price = apt.price || (await priceForReason(apt.providerId, apt.reason));
+  if (!apt.price) await setAppointmentPrice(appointmentId, price);
   return { ok: true, appointmentId, status: "completed", price };
 }
 
@@ -669,12 +749,14 @@ async function dailyReportStep({ date, provider }: { date?: string; provider?: s
   let providerId: string | undefined;
   if (actor?.role === "medico") providerId = staffProviderId(ctx);
   else if (provider) {
-    const r = resolveProviderId(ctx, provider);
+    const r = await resolveProviderId(ctx, provider);
     if (typeof r !== "string") return { ok: false, error: r.error };
     providerId = r;
   }
-  const report = buildDayReport(orgId, day, providerId);
-  const saved = getSavedDailyReport(orgId, day, providerId ?? "");
+  const [report, saved] = await Promise.all([
+    buildDayReport(orgId, day, providerId),
+    getSavedDailyReport(orgId, day, providerId ?? ""),
+  ]);
   return {
     ok: true,
     organization: actor?.activeOrg?.name,
@@ -693,11 +775,11 @@ async function closeDayStep({ date }: { date?: string }, ctx: ToolCtx) {
   const day = date?.trim() || DEMO_TODAY;
   const by = actorOf(ctx)?.name ?? "Recepción";
   const orgName = actorOf(ctx)?.activeOrg?.name ?? "el consultorio";
-  const clinic = buildDayReport(orgId, day);
+  const clinic = await buildDayReport(orgId, day);
 
-  saveDailyReport(orgId, day, "", by, clinic);
+  await saveDailyReport(orgId, day, "", by, clinic);
   for (const p of clinic.providers) {
-    saveDailyReport(orgId, day, p.providerId, by, buildDayReport(orgId, day, p.providerId));
+    await saveDailyReport(orgId, day, p.providerId, by, await buildDayReport(orgId, day, p.providerId));
   }
 
   const lines = [
@@ -722,7 +804,7 @@ const toMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 const fromMin = (m: number) =>
   `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 
-function agendaSummary(a: ReturnType<typeof providerAgenda>) {
+function agendaSummary(a: Awaited<ReturnType<typeof providerAgenda>>) {
   return {
     reloj: a.clock,
     marcha: a.running,
@@ -745,7 +827,7 @@ async function warnDelayStep(
     return { ok: false, error: "Esta herramienta es para el profesional (se demora en su consulta)." };
   }
   const extra = Math.max(5, Math.round(extraMinutes ?? 15));
-  const agenda = providerAgenda(providerId, DEMO_TODAY);
+  const agenda = await providerAgenda(providerId, DEMO_TODAY);
   const waiting = [...(agenda.next ? [agenda.next] : []), ...agenda.upcoming];
   if (waiting.length === 0) {
     return { ok: true, message: "No hay pacientes esperando a los que avisar.", avisosEnviados: [] };
@@ -758,7 +840,7 @@ async function warnDelayStep(
       `El/la profesional se está demorando${because}. Tu turno de las ${e.scheduled} ` +
       `podría correrse ~${extra} min (estimado ~${est}). Te confirmamos apenas se libere; ` +
       `si preferís, podés venir más tarde.`;
-    replacePatientNotice(orgId, e.appointmentId, e.patientId, DEMO_TODAY, msg);
+    await replacePatientNotice(orgId, e.appointmentId, e.patientId, DEMO_TODAY, msg);
     out.push({ patient: e.patientName, message: msg });
   }
   return { ok: true, extraMinutes: extra, avisosEnviados: out };
@@ -770,12 +852,12 @@ async function nextPatientStep(_input: unknown, ctx: ToolCtx) {
   const providerId = staffProviderId(ctx);
   if (!orgId || !providerId) return { ok: false, error: "Esta herramienta es para el profesional." };
 
-  const agenda = providerAgenda(providerId, DEMO_TODAY);
+  const agenda = await providerAgenda(providerId, DEMO_TODAY);
   const target = agenda.inAttention ?? agenda.next;
   if (!target) {
     return { ok: true, message: "No quedan pacientes en la agenda de hoy.", agenda: agendaSummary(agenda) };
   }
-  const briefing = buildPatientBriefing(target.patientId, orgId);
+  const briefing = await buildPatientBriefing(target.patientId, orgId);
   return {
     ok: true,
     estado: agenda.inAttention ? "en atención" : "próximo",
@@ -796,19 +878,23 @@ async function startAttentionStep({ appointmentId }: { appointmentId?: string },
   "use step";
   const provId = staffProviderId(ctx);
   const a = appointmentId
-    ? getAppointment(appointmentId)
+    ? await getAppointment(appointmentId)
     : provId
-      ? nextScheduledAppointment(provId, DEMO_TODAY)
+      ? await nextScheduledAppointment(provId, DEMO_TODAY)
       : undefined;
   if (!a) return { ok: false, error: "No encontré el turno a iniciar." };
   if (provId && a.providerId !== provId) return { ok: false, error: "Ese turno no es de tu agenda." };
   try {
-    const started = startAttention(a.id);
-    const notified = refreshWaitingNotices(a.organizationId, a.providerId);
+    const started = await startAttention(a.id);
+    const notified = await refreshWaitingNotices(a.organizationId, a.providerId);
+    const [patient, agenda] = await Promise.all([
+      getPatient(started.patientId),
+      providerAgenda(a.providerId, DEMO_TODAY),
+    ]);
     return {
       ok: true,
-      enAtencion: getPatient(started.patientId)?.fullName,
-      agenda: agendaSummary(providerAgenda(a.providerId, DEMO_TODAY)),
+      enAtencion: patient?.fullName,
+      agenda: agendaSummary(agenda),
       avisosEnviados: notified,
     };
   } catch (err) {
@@ -823,19 +909,22 @@ async function finishAttentionStep(
   "use step";
   const provId = staffProviderId(ctx);
   const a = appointmentId
-    ? getAppointment(appointmentId)
+    ? await getAppointment(appointmentId)
     : provId
-      ? inProgressAppointment(provId, DEMO_TODAY)
+      ? await inProgressAppointment(provId, DEMO_TODAY)
       : undefined;
   if (!a) return { ok: false, error: "No hay ninguna atención en curso para cerrar." };
   if (provId && a.providerId !== provId) return { ok: false, error: "Ese turno no es de tu agenda." };
   try {
-    finishAttention(a.id, actualMinutes);
-    const notified = refreshWaitingNotices(a.organizationId, a.providerId);
-    const agenda = providerAgenda(a.providerId, DEMO_TODAY);
+    await finishAttention(a.id, actualMinutes);
+    const notified = await refreshWaitingNotices(a.organizationId, a.providerId);
+    const [agenda, patient] = await Promise.all([
+      providerAgenda(a.providerId, DEMO_TODAY),
+      getPatient(a.patientId),
+    ]);
     return {
       ok: true,
-      cerrado: getPatient(a.patientId)?.fullName,
+      cerrado: patient?.fullName,
       duracionMin: actualMinutes ?? a.durationMinutes,
       agenda: agendaSummary(agenda),
       proximo: agenda.next
@@ -854,18 +943,22 @@ async function myVisitStatusStep(_input: unknown, ctx: ToolCtx) {
   if (actor?.role !== "paciente" || !actor.patientId) {
     return { ok: false, error: "Esta herramienta es para el paciente." };
   }
-  const appt = patientNextAppointment(actor.patientId, DEMO_TODAY, patientOrgIds(ctx));
-  const notices = listPatientNotices(actor.patientId, DEMO_TODAY).map((n) => n.message);
+  const appt = await patientNextAppointment(actor.patientId, DEMO_TODAY, patientOrgIds(ctx));
+  const noticesRaw = await listPatientNotices(actor.patientId, DEMO_TODAY);
+  const notices = noticesRaw.map((n) => n.message);
   if (!appt) return { ok: true, tenesTurnoHoy: false, avisos: notices };
 
-  const agenda = providerAgenda(appt.providerId, DEMO_TODAY);
+  const agenda = await providerAgenda(appt.providerId, DEMO_TODAY);
   const entry =
     [agenda.inAttention, agenda.next, ...agenda.upcoming].find((e) => e?.appointmentId === appt.id) ?? null;
-  const earlier = entry ? earlierOpeningToday(appt.providerId, DEMO_TODAY, entry.estimated) : undefined;
+  const [earlier, org] = await Promise.all([
+    entry ? earlierOpeningToday(appt.providerId, DEMO_TODAY, entry.estimated) : Promise.resolve(undefined),
+    getOrganization(appt.organizationId),
+  ]);
   return {
     ok: true,
     tenesTurnoHoy: true,
-    consultorio: getOrganization(appt.organizationId)?.name,
+    consultorio: org?.name,
     profesional: agenda.providerName,
     motivo: appt.reason,
     programado: entry?.scheduled,
@@ -883,13 +976,14 @@ async function changeMyVisitTimeStep({ direction }: { direction: "later" | "earl
   if (actor?.role !== "paciente" || !actor.patientId) {
     return { ok: false, error: "Esta herramienta es para el paciente." };
   }
-  const appt = patientNextAppointment(actor.patientId, DEMO_TODAY, patientOrgIds(ctx));
+  const appt = await patientNextAppointment(actor.patientId, DEMO_TODAY, patientOrgIds(ctx));
   if (!appt) return { ok: false, error: "No tenés un turno hoy." };
-  const agenda = providerAgenda(appt.providerId, DEMO_TODAY);
+  const agenda = await providerAgenda(appt.providerId, DEMO_TODAY);
   const entry = [agenda.next, ...agenda.upcoming].find((e) => e?.appointmentId === appt.id) ?? null;
 
   if (direction === "later") {
-    listPatientNotices(actor.patientId, DEMO_TODAY).forEach((n) => resolvePatientNotice(n.id));
+    const notices = await listPatientNotices(actor.patientId, DEMO_TODAY);
+    for (const n of notices) await resolvePatientNotice(n.id);
     return {
       ok: true,
       accion: "confirmado-mas-tarde",
@@ -897,17 +991,22 @@ async function changeMyVisitTimeStep({ direction }: { direction: "later" | "earl
     };
   }
 
-  const opening = earlierOpeningToday(appt.providerId, DEMO_TODAY, entry?.estimated ?? entry?.scheduled ?? "23:59");
+  const opening = await earlierOpeningToday(
+    appt.providerId,
+    DEMO_TODAY,
+    entry?.estimated ?? entry?.scheduled ?? "23:59",
+  );
   if (!opening) return { ok: true, accion: "sin-lugar-antes", mensaje: "Por ahora no hay lugar para adelantarte." };
-  cancelAppointmentById(appt.id);
-  const moved = bookSlot({
+  await cancelAppointmentById(appt.id);
+  const moved = await bookSlot({
     organizationId: appt.organizationId,
     patientId: appt.patientId,
     slotId: opening.slotId,
     reason: appt.reason,
   });
-  setAppointmentPrice(moved.id, appt.price || priceForReason(moved.providerId, appt.reason));
-  listPatientNotices(actor.patientId, DEMO_TODAY).forEach((n) => resolvePatientNotice(n.id));
+  await setAppointmentPrice(moved.id, appt.price || (await priceForReason(moved.providerId, appt.reason)));
+  const notices = await listPatientNotices(actor.patientId, DEMO_TODAY);
+  for (const n of notices) await resolvePatientNotice(n.id);
   return {
     ok: true,
     accion: "adelantado",
@@ -950,14 +1049,14 @@ export const secretaryTools = {
 
   registerPatient: {
     description:
-      "Da de alta un paciente en ESTE consultorio (médico/a o recepción). Pedí antes TODOS estos datos, son obligatorios: nombre y apellido, DNI, fecha de nacimiento (AAAA-MM-DD), cobertura, email y teléfono. El email y el teléfono son los que después le permiten al paciente activar su acceso al portal y recuperar el PIN, así que no los omitas. Si ya existe alguien con ese DNI, no dupliques: se lo suma a este consultorio.",
+      "Da de alta un paciente en ESTE consultorio (médico/a o recepción). Si el paciente YA está en el sistema, con el DNI alcanza: se lo suma a este consultorio sin pedir nada más. Si es NUEVO, pedí además: nombre y apellido, fecha de nacimiento (AAAA-MM-DD), cobertura, email y teléfono (el email y el teléfono son obligatorios para el paciente nuevo: le sirven para recuperar el PIN y entrar). En ambos casos el paciente queda habilitado a entrar con su DNI o email y 'Olvidé mi PIN'.",
     inputSchema: z.object({
-      fullName: z.string(),
-      dni: z.string(),
-      dateOfBirth: z.string().describe("AAAA-MM-DD"),
-      coverage: z.string().describe("Obra social o prepaga"),
-      phone: z.string().describe("Teléfono de contacto (obligatorio)"),
-      email: z.string().describe("Email de contacto (obligatorio, sirve para activar el portal)"),
+      dni: z.string().describe("DNI del paciente (obligatorio siempre)"),
+      fullName: z.string().optional().describe("Solo si es paciente nuevo"),
+      dateOfBirth: z.string().optional().describe("AAAA-MM-DD, solo si es paciente nuevo"),
+      coverage: z.string().optional().describe("Obra social o prepaga, solo si es paciente nuevo"),
+      phone: z.string().optional().describe("Teléfono, obligatorio si es paciente nuevo"),
+      email: z.string().optional().describe("Email, obligatorio si es paciente nuevo"),
       reason: z.string().optional(),
     }),
     execute: registerPatientStep,
@@ -965,14 +1064,15 @@ export const secretaryTools = {
 
   registerProfessional: {
     description:
-      "Da de alta a alguien del equipo en ESTE consultorio (secretaría administrativa, o el/la fundador/a). Elegí `role`: 'medico' para un/a profesional (pedí el tipo/especialidad: deportólogo, cardiólogo, psicólogo, kinesiólogo, etc. — y consultorio opcional) o 'recepcion' para una secretaría administrativa (sin especialidad). Siempre: nombre, email para ingresar y un PIN de 4 dígitos. Si esa persona ya tiene cuenta (mismo email), se la suma acá con su PIN de siempre.",
+      "Da de alta a alguien del equipo en ESTE consultorio (secretaría administrativa, o el/la fundador/a). Elegí `role`: 'medico' (default) para un/a profesional o 'recepcion' para secretaría administrativa. Si la persona YA está en el sistema, con el DNI alcanza: se la suma acá (el profesional con agenda propia). Si es NUEVA, pedí además: nombre, email y teléfono (y la especialidad si es 'medico'). La persona entra con su DNI o email y 'Olvidé mi PIN' para elegir su PIN — no se asignan PINs a mano.",
     inputSchema: z.object({
       role: z.enum(["medico", "recepcion"]).optional().describe("'medico' (default) o 'recepcion'"),
-      fullName: z.string().describe("Nombre con título si es profesional, ej. 'Dra. Laura Gómez'"),
-      email: z.string().describe("Email con el que va a iniciar sesión"),
-      specialty: z.string().optional().describe("Tipo de profesional (solo para role='medico')"),
+      dni: z.string().describe("DNI de la persona (obligatorio siempre)"),
+      fullName: z.string().optional().describe("Nombre con título si es profesional; solo si es persona nueva"),
+      email: z.string().optional().describe("Email para ingresar / recuperar PIN; obligatorio si es persona nueva"),
+      phone: z.string().optional().describe("Teléfono; obligatorio si es persona nueva"),
+      specialty: z.string().optional().describe("Tipo de profesional (solo role='medico', persona nueva)"),
       roomLabel: z.string().optional(),
-      pin: z.string().describe("PIN de 4 dígitos"),
     }),
     execute: registerProfessionalStep,
   },

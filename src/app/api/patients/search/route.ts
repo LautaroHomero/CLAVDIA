@@ -7,7 +7,7 @@ import { searchPatients } from "@/lib/db/repo";
  * phone or id.
  */
 export async function GET(req: Request) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) return Response.json({ error: "No autenticado." }, { status: 401 });
   if (actor.role === "paciente") {
     return Response.json({ error: "Solo personal del consultorio." }, { status: 403 });
@@ -16,7 +16,7 @@ export async function GET(req: Request) {
   if (!orgId) return Response.json({ error: "Sin organización activa." }, { status: 400 });
 
   const q = (new URL(req.url).searchParams.get("q") ?? "").trim();
-  const all = searchPatients(orgId, q);
+  const all = await searchPatients(orgId, q);
   const matches = all.slice(0, 200).map((p) => ({
     patientId: p.id,
     fullName: p.fullName,

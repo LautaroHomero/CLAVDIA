@@ -34,6 +34,8 @@ export interface User {
   id: string;
   name: string;
   email: string;
+  dni: string;
+  phone: string;
   role: Role;
   patientId?: string;
 }

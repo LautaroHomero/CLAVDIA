@@ -3,9 +3,9 @@ import type { Actor } from "@/lib/domain/types";
 import { claimsFromRequest, type SessionClaims } from "./session";
 
 /** Turns the signed session claims into the full Actor (memberships, org names…). */
-export function hydrateActor(claims: SessionClaims | null): Actor | null {
+export async function hydrateActor(claims: SessionClaims | null): Promise<Actor | null> {
   if (!claims) return null;
-  const user = getUser(claims.userId);
+  const user = await getUser(claims.userId);
   if (!user) return null;
 
   if (user.role === "paciente") {
@@ -15,11 +15,11 @@ export function hydrateActor(claims: SessionClaims | null): Actor | null {
       name: user.name,
       role: "paciente",
       patientId: user.patientId,
-      orgs: patientOrgs(user.patientId),
+      orgs: await patientOrgs(user.patientId),
     };
   }
 
-  const mems = membershipsForUser(user.id);
+  const mems = await membershipsForUser(user.id);
   if (mems.length === 0) return null;
   const active = mems.find((m) => m.organizationId === claims.activeOrgId) ?? mems[0];
   return {
@@ -38,6 +38,6 @@ export function hydrateActor(claims: SessionClaims | null): Actor | null {
   };
 }
 
-export function actorFromRequest(req: Request): Actor | null {
+export function actorFromRequest(req: Request): Promise<Actor | null> {
   return hydrateActor(claimsFromRequest(req));
 }

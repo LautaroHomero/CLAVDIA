@@ -11,12 +11,13 @@ import type { Actor, Appointment } from "@/lib/domain/types";
 type Access = { ok: true } | { ok: false; status: number; error: string };
 
 /** May this actor manage this appointment by hand? */
-function checkAccess(actor: Actor, appt: Appointment): Access {
+async function checkAccess(actor: Actor, appt: Appointment): Promise<Access> {
   if (actor.role === "paciente") {
     if (appt.patientId !== actor.patientId) {
       return { ok: false, status: 403, error: "Ese turno no pertenece a tu ficha." };
     }
-    if (getProviderSettings(appt.providerId).whoCanChange === "staff_only") {
+    const settings = await getProviderSettings(appt.providerId);
+    if (settings.whoCanChange === "staff_only") {
       return {
         ok: false,
         status: 403,
@@ -39,21 +40,22 @@ function checkAccess(actor: Actor, appt: Appointment): Access {
 }
 
 /** True when a patient's late change must be signed off by the professional. */
-function needsSignOff(actor: Actor, appt: Appointment): boolean {
+async function needsSignOff(actor: Actor, appt: Appointment): Promise<boolean> {
   if (actor.role !== "paciente") return false;
   const hoursUntil = (Date.parse(appt.start) - Date.now()) / 3_600_000;
-  return hoursUntil < 24 && getProviderSettings(appt.providerId).lateChangePolicy === "needs_approval";
+  const settings = await getProviderSettings(appt.providerId);
+  return hoursUntil < 24 && settings.lateChangePolicy === "needs_approval";
 }
 
 export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }> }) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) return Response.json({ ok: false, error: "No autenticado." }, { status: 401 });
 
   const { id } = await ctx.params;
-  const appt = getAppointment(id);
+  const appt = await getAppointment(id);
   if (!appt) return Response.json({ ok: false, error: "El turno no existe." }, { status: 404 });
 
-  const access = checkAccess(actor, appt);
+  const access = await checkAccess(actor, appt);
   if (!access.ok) return Response.json({ ok: false, error: access.error }, { status: access.status });
   if (appt.status !== "scheduled") {
     return Response.json({ ok: false, error: `El turno está ${appt.status}.` }, { status: 409 });
@@ -62,7 +64,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   const { newSlotId } = (await req.json()) as { newSlotId?: string };
   const slotId = newSlotId?.trim();
   if (!slotId) return Response.json({ ok: false, error: "Falta el nuevo horario." }, { status: 400 });
-  const slot = getSlot(slotId);
+  const slot = await getSlot(slotId);
   if (!slot || slot.taken) {
     return Response.json({ ok: false, error: "Ese horario no está disponible." }, { status: 409 });
   }
@@ -73,8 +75,8 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     );
   }
 
-  if (needsSignOff(actor, appt)) {
-    createChangeRequest({
+  if (await needsSignOff(actor, appt)) {
+    await createChangeRequest({
       organizationId: appt.organizationId,
       appointmentId: appt.id,
       providerId: appt.providerId,
@@ -91,7 +93,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     });
   }
 
-  const res = rescheduleAppointment(appt.id, slotId);
+  const res = await rescheduleAppointment(appt.id, slotId);
   if (!res.ok) return Response.json(res, { status: 409 });
   return Response.json({
     ok: true,
@@ -103,21 +105,21 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
 }
 
 export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }> }) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) return Response.json({ ok: false, error: "No autenticado." }, { status: 401 });
 
   const { id } = await ctx.params;
-  const appt = getAppointment(id);
+  const appt = await getAppointment(id);
   if (!appt) return Response.json({ ok: false, error: "El turno no existe." }, { status: 404 });
 
-  const access = checkAccess(actor, appt);
+  const access = await checkAccess(actor, appt);
   if (!access.ok) return Response.json({ ok: false, error: access.error }, { status: access.status });
   if (appt.status !== "scheduled") {
     return Response.json({ ok: false, error: `El turno está ${appt.status}.` }, { status: 409 });
   }
 
-  if (needsSignOff(actor, appt)) {
-    createChangeRequest({
+  if (await needsSignOff(actor, appt)) {
+    await createChangeRequest({
       organizationId: appt.organizationId,
       appointmentId: appt.id,
       providerId: appt.providerId,
@@ -133,7 +135,7 @@ export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }
     });
   }
 
-  const res = cancelAppointment(appt.id);
+  const res = await cancelAppointment(appt.id);
   if (!res.ok) return Response.json(res, { status: 409 });
   return Response.json({ ok: true, pending: false, notices: res.notices });
 }

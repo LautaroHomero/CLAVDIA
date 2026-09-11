@@ -1,6 +1,7 @@
 import {
   createPatient,
   createUser,
+  ensurePatientLogin,
   getOrganization,
   getPatientByDni,
   getUserByPatientId,
@@ -28,7 +29,7 @@ import type { Actor } from "@/lib/domain/types";
  *    join the chosen organization, and start a session.
  */
 export async function POST(req: Request) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (actor && actor.role !== "paciente") return staffCreateOrJoin(req, actor);
 
   const body = (await req.json()) as {
@@ -49,7 +50,7 @@ export async function POST(req: Request) {
   const email = body.email?.trim().toLowerCase();
   const phone = body.phone?.trim();
   const pin = body.pin?.trim();
-  const org = body.organizationId ? getOrganization(body.organizationId) : undefined;
+  const org = body.organizationId ? await getOrganization(body.organizationId) : undefined;
 
   if (
     !fullName || !dni || !dateOfBirth || !coverage || !email || !phone ||
@@ -66,20 +67,20 @@ export async function POST(req: Request) {
   if (!phoneOk(phone)) {
     return Response.json({ ok: false, error: "El teléfono no parece válido." }, { status: 400 });
   }
-  if (userEmailTaken(email)) {
+  if (await userEmailTaken(email)) {
     return Response.json(
       { ok: false, error: "Ya hay una cuenta con ese email. Probá iniciar sesión." },
       { status: 409 },
     );
   }
 
-  let patient = getPatientByDni(dni);
+  let patient = await getPatientByDni(dni);
   if (patient) {
     // A ficha for this DNI already exists. It may only be claimed by someone who
     // can prove they are that person — the email AND phone must match what the
     // clinic already has on file. Otherwise this endpoint would let anyone bind
     // a fresh login to a stranger's clinical record using just their DNI.
-    if (getUserByPatientId(patient.id)) {
+    if (await getUserByPatientId(patient.id)) {
       return Response.json(
         { ok: false, error: "Ya existe una cuenta para ese DNI. Iniciá sesión o recuperá tu PIN." },
         { status: 409 },
@@ -106,7 +107,7 @@ export async function POST(req: Request) {
       );
     }
   } else {
-    patient = createPatient({
+    patient = await createPatient({
       fullName,
       dni,
       dateOfBirth,
@@ -116,14 +117,14 @@ export async function POST(req: Request) {
       notes: "Alta por autogestión del paciente.",
     });
   }
-  joinPatientOrg(patient.id, org.id);
+  await joinPatientOrg(patient.id, org.id);
 
   const { hash, salt } = hashPin(pin);
-  const user = createUser({ name: fullName, email, role: "paciente", pinHash: hash, pinSalt: salt, patientId: patient.id });
+  const user = await createUser({ name: fullName, email, role: "paciente", pinHash: hash, pinSalt: salt, patientId: patient.id });
 
   const claims = { userId: user.id, role: "paciente" as const, patientId: patient.id };
   return Response.json(
-    { ok: true, actor: hydrateActor(claims) },
+    { ok: true, actor: await hydrateActor(claims) },
     { headers: { "Set-Cookie": sessionSetCookie(signSession(claims)) } },
   );
 }
@@ -142,20 +143,44 @@ async function staffCreateOrJoin(req: Request, actor: Actor) {
     email?: string;
     notes?: string;
   };
-  const fullName = body.fullName?.trim();
   const dni = body.dni?.trim();
+  if (!dni) {
+    return Response.json({ ok: false, error: "Indicá el DNI." }, { status: 400 });
+  }
+
+  // Already in the system → just link to this org (DNI is enough, no re-entry).
+  const existing = await getPatientByDni(dni);
+  if (existing) {
+    const alreadyHere = await patientInOrg(existing.id, orgId);
+    if (!alreadyHere) await joinPatientOrg(existing.id, orgId);
+    await ensurePatientLogin({
+      patientId: existing.id,
+      name: existing.fullName,
+      email: existing.email,
+      dni: existing.dni,
+      phone: existing.phone,
+    });
+    return Response.json({
+      ok: true,
+      patientId: existing.id,
+      alreadyExisted: true,
+      message: alreadyHere
+        ? `${existing.fullName} (DNI ${existing.dni}) ya era paciente de ${orgName}.`
+        : `${existing.fullName} (DNI ${existing.dni}) ya estaba en el sistema; lo/la sumamos a ${orgName}.`,
+    });
+  }
+
+  // New person → full data required (email + phone are the recovery anchors).
+  const fullName = body.fullName?.trim();
   const dateOfBirth = body.dateOfBirth?.trim();
   const coverage = body.coverage?.trim();
   const email = body.email?.trim().toLowerCase();
   const phone = body.phone?.trim();
-  // Email + phone are mandatory: they are what lets the patient later claim their
-  // portal login and recover their PIN, and the only identity anchor we can check
-  // against when they do.
-  if (!fullName || !dni || !dateOfBirth || !coverage || !email || !phone) {
+  if (!fullName || !dateOfBirth || !coverage || !email || !phone) {
     return Response.json(
       {
         ok: false,
-        error: "Completá nombre, DNI, fecha de nacimiento (AAAA-MM-DD), cobertura, email y teléfono.",
+        error: "Paciente nuevo: completá nombre, fecha de nacimiento (AAAA-MM-DD), cobertura, email y teléfono.",
       },
       { status: 400 },
     );
@@ -167,35 +192,14 @@ async function staffCreateOrJoin(req: Request, actor: Actor) {
     return Response.json({ ok: false, error: "El teléfono no parece válido." }, { status: 400 });
   }
 
-  const existing = getPatientByDni(dni);
-  if (existing) {
-    const alreadyHere = patientInOrg(existing.id, orgId);
-    if (!alreadyHere) joinPatientOrg(existing.id, orgId);
-    return Response.json({
-      ok: true,
-      patientId: existing.id,
-      alreadyExisted: true,
-      message: alreadyHere
-        ? `${existing.fullName} (DNI ${existing.dni}) ya era paciente de ${orgName}.`
-        : `${existing.fullName} (DNI ${existing.dni}) ya tenía ficha; lo/la sumamos a ${orgName}.`,
-    });
-  }
-
-  const patient = createPatient({
-    fullName,
-    dni,
-    dateOfBirth,
-    coverage,
-    phone,
-    email,
-    notes: body.notes,
-  });
-  joinPatientOrg(patient.id, orgId);
+  const patient = await createPatient({ fullName, dni, dateOfBirth, coverage, phone, email, notes: body.notes });
+  await joinPatientOrg(patient.id, orgId);
+  await ensurePatientLogin({ patientId: patient.id, name: fullName, email, dni, phone });
   return Response.json({
     ok: true,
     patientId: patient.id,
     alreadyExisted: false,
     fullName: patient.fullName,
-    message: `Ficha creada en ${orgName}.`,
+    message: `Ficha creada en ${orgName}. Puede entrar con su DNI o email y "Olvidé mi PIN" para elegir su PIN.`,
   });
 }

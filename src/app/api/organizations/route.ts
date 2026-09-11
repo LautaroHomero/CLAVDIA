@@ -16,8 +16,9 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** Public list of organizations (for the patient's "elegí dónde atenderte"). */
 export async function GET() {
+  const orgs = await listOrganizations();
   return Response.json({
-    organizations: listOrganizations().map((o) => ({
+    organizations: orgs.map((o) => ({
       id: o.id,
       name: o.name,
       address: o.address,
@@ -42,6 +43,8 @@ export async function POST(req: Request) {
     hours?: string;
     founderName?: string;
     founderEmail?: string;
+    founderDni?: string;
+    founderPhone?: string;
     founderRole?: "recepcion" | "medico";
     specialty?: string;
     roomLabel?: string;
@@ -51,17 +54,22 @@ export async function POST(req: Request) {
   const orgName = body.orgName?.trim();
   const founderName = body.founderName?.trim();
   const founderEmail = body.founderEmail?.trim().toLowerCase();
+  const founderDni = body.founderDni?.trim();
+  const founderPhone = body.founderPhone?.trim();
   const founderRole: StaffRole = body.founderRole === "medico" ? "medico" : "recepcion";
   const pin = body.pin?.trim();
 
-  if (!orgName || !founderName || !founderEmail || !pin) {
+  if (!orgName || !founderName || !founderEmail || !founderDni || !founderPhone || !pin) {
     return Response.json(
-      { ok: false, error: "Completá el consultorio, tu nombre, tu email y un PIN." },
+      { ok: false, error: "Completá el consultorio, tu nombre, DNI, email, teléfono y un PIN." },
       { status: 400 },
     );
   }
   if (!EMAIL_RE.test(founderEmail)) {
     return Response.json({ ok: false, error: "El email no parece válido." }, { status: 400 });
+  }
+  if (founderPhone.replace(/\D/g, "").length < 8) {
+    return Response.json({ ok: false, error: "El teléfono no parece válido." }, { status: 400 });
   }
   if (!/^\d{4}$/.test(pin)) {
     return Response.json({ ok: false, error: "El PIN tiene que ser de 4 dígitos." }, { status: 400 });
@@ -72,17 +80,17 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  if (organizationNameTaken(orgName)) {
+  if (await organizationNameTaken(orgName)) {
     return Response.json({ ok: false, error: "Ya existe una organización con ese nombre." }, { status: 409 });
   }
-  if (userEmailTaken(founderEmail)) {
+  if (await userEmailTaken(founderEmail)) {
     return Response.json(
       { ok: false, error: "Ya hay una cuenta con ese email. Iniciá sesión." },
       { status: 409 },
     );
   }
 
-  const org = createOrganization({
+  const org = await createOrganization({
     name: orgName,
     address: body.address,
     city: body.city,
@@ -93,10 +101,12 @@ export async function POST(req: Request) {
 
   let userId: string;
   if (founderRole === "medico") {
-    const res = createProfessional({
+    const res = await createProfessional({
       organizationId: org.id,
       name: founderName,
       email: founderEmail,
+      dni: founderDni,
+      phone: founderPhone,
       specialty: body.specialty!.trim(),
       roomLabel: body.roomLabel?.trim() || "Consultorio 1",
       pinHash: hash,
@@ -105,20 +115,22 @@ export async function POST(req: Request) {
     });
     userId = res.userId;
   } else {
-    const user = createUser({
+    const user = await createUser({
       name: founderName,
       email: founderEmail,
       role: "recepcion",
       pinHash: hash,
       pinSalt: salt,
+      dni: founderDni,
+      phone: founderPhone,
     });
-    addMembership({ userId: user.id, organizationId: org.id, role: "recepcion", canAdmin: true });
+    await addMembership({ userId: user.id, organizationId: org.id, role: "recepcion", canAdmin: true });
     userId = user.id;
   }
 
   const claims: SessionClaims = { userId, role: founderRole, activeOrgId: org.id };
   return Response.json(
-    { ok: true, actor: hydrateActor(claims), organization: { id: org.id, name: org.name } },
+    { ok: true, actor: await hydrateActor(claims), organization: { id: org.id, name: org.name } },
     { headers: { "Set-Cookie": sessionSetCookie(signSession(claims)) } },
   );
 }

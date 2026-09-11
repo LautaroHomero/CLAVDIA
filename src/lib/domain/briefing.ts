@@ -40,8 +40,11 @@ function ageFrom(dob: string): number {
  * Scoped to `orgId` when given (a professional sees their own org's turns,
  * invoices and labs — the ficha itself is global).
  */
-export function buildPatientBriefing(patientId: string, orgId?: string): PatientBriefing {
-  const patient = getPatient(patientId);
+export async function buildPatientBriefing(
+  patientId: string,
+  orgId?: string,
+): Promise<PatientBriefing> {
+  const patient = await getPatient(patientId);
   if (!patient) {
     return {
       found: false,
@@ -51,16 +54,23 @@ export function buildPatientBriefing(patientId: string, orgId?: string): Patient
 
   const age = ageFrom(patient.dateOfBirth);
   const orgFilter = orgId ? [orgId] : undefined;
-  const upcoming = getUpcomingAppointments(patient.id, orgFilter).map((a) => ({
-    id: a.id,
-    when: a.start.replace("T", " "),
-    provider: getProvider(a.providerId)?.name ?? a.providerId,
-    reason: a.reason,
-  }));
-  const outstanding = getInvoicesForPatient(patient.id, orgId)
+  const [upcomingAppts, invoices, labs] = await Promise.all([
+    getUpcomingAppointments(patient.id, orgFilter),
+    getInvoicesForPatient(patient.id, orgId),
+    getLabResultsForPatient(patient.id, orgId),
+  ]);
+  const upcoming = await Promise.all(
+    upcomingAppts.map(async (a) => ({
+      id: a.id,
+      when: a.start.replace("T", " "),
+      provider: (await getProvider(a.providerId))?.name ?? a.providerId,
+      reason: a.reason,
+    })),
+  );
+  const outstanding = invoices
     .filter((i) => i.status === "unpaid")
     .map((i) => ({ id: i.id, concept: i.concept, amount: i.amount, date: i.date }));
-  const pendingLabs = getLabResultsForPatient(patient.id, orgId)
+  const pendingLabs = labs
     .filter((l) => l.status === "pending-review")
     .map((l) => ({ id: l.id, panel: l.panel, date: l.date, summary: l.summary }));
 

@@ -3,7 +3,7 @@ import { getProvider, getProviderSettings, listOpenSlots } from "@/lib/db/repo";
 
 /** Open slots for the manual booking / reschedule pickers. */
 export async function GET(req: Request) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) return Response.json({ error: "No autenticado." }, { status: 401 });
 
   const url = new URL(req.url);
@@ -23,12 +23,16 @@ export async function GET(req: Request) {
   }
 
   const isPatient = actor.role === "paciente";
-  const slots = listOpenSlots(orgId, { providerId, date })
-    // Patients can't self-book on a professional who keeps changes staff-only.
-    .filter((s) => !isPatient || getProviderSettings(s.providerId).whoCanChange !== "staff_only")
-    .slice(0, 60)
-    .map((s) => {
-      const provider = getProvider(s.providerId);
+  const openSlots = await listOpenSlots(orgId, { providerId, date });
+  const filtered = [];
+  for (const s of openSlots) {
+    if (isPatient && (await getProviderSettings(s.providerId)).whoCanChange === "staff_only") continue;
+    filtered.push(s);
+    if (filtered.length >= 60) break;
+  }
+  const slots = await Promise.all(
+    filtered.map(async (s) => {
+      const provider = await getProvider(s.providerId);
       return {
         slotId: s.id,
         start: s.start,
@@ -37,7 +41,8 @@ export async function GET(req: Request) {
         provider: provider?.name ?? s.providerId,
         specialty: provider?.specialty,
       };
-    });
+    }),
+  );
 
   return Response.json({ count: slots.length, slots });
 }

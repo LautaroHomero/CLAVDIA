@@ -186,8 +186,13 @@ function NewPatientForm({
 
   return (
     <div className="space-y-2 rounded-lg border border-hairline p-3">
-      <input value={f.fullName} onChange={set("fullName")} placeholder="Nombre y apellido" className={FIELD} />
       <input value={f.dni} onChange={set("dni")} placeholder="DNI" className={FIELD} />
+      <p className="text-[11px] text-muted">
+        Si el paciente ya está en el sistema, con el DNI alcanza: se lo suma a este consultorio. Si es
+        nuevo/a, completá también nombre, nacimiento, cobertura, email y teléfono (email y teléfono le
+        sirven para recuperar el PIN y entrar).
+      </p>
+      <input value={f.fullName} onChange={set("fullName")} placeholder="Nombre y apellido" className={FIELD} />
       <input
         value={f.dateOfBirth}
         onChange={set("dateOfBirth")}
@@ -197,22 +202,12 @@ function NewPatientForm({
       <input value={f.coverage} onChange={set("coverage")} placeholder="Cobertura (obra social / prepaga)" className={FIELD} />
       <input value={f.phone} onChange={set("phone")} placeholder="Teléfono" className={FIELD} />
       <input value={f.email} onChange={set("email")} placeholder="Email" className={FIELD} />
-      <p className="text-[11px] text-muted">
-        El email y el teléfono son obligatorios: con ellos el paciente activa su acceso al portal y recupera el
-        PIN. Si el DNI ya existe (incluye pacientes que se registraron solos), no se duplica: se suma a este
-        consultorio.
-      </p>
       <div className="flex gap-2">
         <button
           className={BTN_DARK}
           disabled={
             busy ||
-            !f.fullName.trim() ||
-            !f.dni.trim() ||
-            !f.dateOfBirth.trim() ||
-            !f.coverage.trim() ||
-            !f.phone.trim() ||
-            !f.email.trim()
+            f.dni.replace(/\D/g, "").length < 7
           }
           onClick={submit}
         >

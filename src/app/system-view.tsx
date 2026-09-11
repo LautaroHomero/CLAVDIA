@@ -440,28 +440,25 @@ function ProfesionalesPanel({
   );
 }
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const OTHER = "__other__";
 
 /** Secretaría / founder: add a team member (secretaría or professional) to the active org. */
 function AddProfessional({ onDone }: { onDone: (msg: string) => void }) {
   const [open, setOpen] = useState(false);
   const [role, setRole] = useState<"medico" | "recepcion">("medico");
-  const [f, setF] = useState({ name: "", email: "", specialty: "", specialtyOther: "", roomLabel: "", pin: "" });
+  const [f, setF] = useState({ dni: "", name: "", email: "", phone: "", specialty: "", specialtyOther: "", roomLabel: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setF({ ...f, [k]: e.target.value });
 
   const specialty = f.specialty === OTHER ? f.specialtyOther.trim() : f.specialty;
-  const ready =
-    f.name.trim().length > 1 &&
-    EMAIL_RE.test(f.email.trim()) &&
-    /^\d{4}$/.test(f.pin) &&
-    (role === "recepcion" || specialty.length > 1);
+  // DNI alone is enough for someone already in the system; the server asks for
+  // the rest only when the person is new.
+  const ready = f.dni.replace(/\D/g, "").length >= 7;
 
   function reset() {
-    setF({ name: "", email: "", specialty: "", specialtyOther: "", roomLabel: "", pin: "" });
+    setF({ dni: "", name: "", email: "", phone: "", specialty: "", specialtyOther: "", roomLabel: "" });
     setRole("medico");
   }
 
@@ -474,10 +471,11 @@ function AddProfessional({ onDone }: { onDone: (msg: string) => void }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           role,
-          name: f.name.trim(),
-          email: f.email.trim(),
-          pin: f.pin.replace(/\D/g, "").slice(0, 4),
-          specialty: role === "medico" ? specialty : undefined,
+          dni: f.dni.trim(),
+          name: f.name.trim() || undefined,
+          email: f.email.trim() || undefined,
+          phone: f.phone.trim() || undefined,
+          specialty: role === "medico" ? specialty || undefined : undefined,
           roomLabel: role === "medico" ? f.roomLabel.trim() || undefined : undefined,
         }),
       });
@@ -530,13 +528,18 @@ function AddProfessional({ onDone }: { onDone: (msg: string) => void }) {
         ))}
       </div>
 
+      <input value={f.dni} onChange={set("dni")} placeholder="DNI" className={FIELD} />
+      <p className="text-[11px] text-muted">
+        Si ya está en el sistema, con el DNI alcanza. Si es nuevo/a, completá también:
+      </p>
       <input
         value={f.name}
         onChange={set("name")}
         placeholder={role === "medico" ? "Nombre con título (Dra. Laura Gómez)" : "Nombre y apellido"}
         className={FIELD}
       />
-      <input type="email" value={f.email} onChange={set("email")} placeholder="Email para ingresar" className={FIELD} />
+      <input type="email" value={f.email} onChange={set("email")} placeholder="Email para ingresar / recuperar PIN" className={FIELD} />
+      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono" className={FIELD} />
 
       {role === "medico" && (
         <>
@@ -561,13 +564,9 @@ function AddProfessional({ onDone }: { onDone: (msg: string) => void }) {
         </>
       )}
 
-      <input
-        value={f.pin}
-        onChange={(e) => setF({ ...f, pin: e.target.value.replace(/\D/g, "").slice(0, 4) })}
-        inputMode="numeric"
-        placeholder="PIN inicial (4 dígitos)"
-        className={`${FIELD} text-center tracking-[0.3em]`}
-      />
+      <p className="text-[11px] text-muted">
+        La persona entra con su DNI o email y “Olvidé mi PIN” para elegir su PIN.
+      </p>
       <button className={BTN_DARK} disabled={busy || !ready} onClick={submit}>
         Dar de alta
       </button>

@@ -38,7 +38,7 @@ export async function POST(req: Request) {
   }
 
   const respondedBy = payload.user?.username || payload.user?.name || "Slack";
-  const pending = getPendingRequest(action.token);
+  const pending = await getPendingRequest(action.token);
 
   // Already resolved (or resolved by the web UI first) — acknowledge silently.
   if (!pending) return new Response("", { status: 200 });

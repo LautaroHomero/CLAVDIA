@@ -6,15 +6,17 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:seed": "tsx scripts/seed.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.50",
     "@ai-sdk/react": "^4.0.98",
     "@workflow/ai": "^4.2.1",
     "ai": "^6.0.279",
-    "better-sqlite3": "^13.0.3",
     "next": "16.3.4",
+    "postgres": "^3.4.7",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "workflow": "^4.8.6",
@@ -22,13 +24,14 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "dotenv": "^17.2.3",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
     "tailwindcss": "^4",
+    "tsx": "^4.20.6",
     "typescript": "^5"
   }
 }

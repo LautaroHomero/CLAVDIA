@@ -29,48 +29,53 @@ function groupByDate<T>(rows: { date: string; item: T }[]): { date: string; labe
 
 /** Mini schedule. Professional: their agenda in the active org. Patient: their turns across all orgs. */
 export async function GET(req: Request) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) return Response.json({ error: "No autenticado." }, { status: 401 });
 
   const upcoming = (a: Appointment) => a.start.slice(0, 10) >= DEMO_TODAY && a.status !== "cancelled";
 
   if (actor.role === "medico" && actor.activeOrg?.providerId) {
     const pid = actor.activeOrg.providerId;
-    const today = providerAgenda(pid, DEMO_TODAY);
+    const today = await providerAgenda(pid, DEMO_TODAY);
     const estimatedFor = (id: string) =>
       [today.inAttention, today.next, ...today.upcoming].find((e) => e?.appointmentId === id)?.estimated;
 
-    const rows = providerAppointments(pid)
-      .filter(upcoming)
-      .map((a) => ({
+    const appts = (await providerAppointments(pid)).filter(upcoming);
+    const rows = await Promise.all(
+      appts.map(async (a) => ({
         date: a.start.slice(0, 10),
         item: {
           time: a.start.slice(11, 16),
-          who: getPatient(a.patientId)?.fullName ?? a.patientId,
+          who: (await getPatient(a.patientId))?.fullName ?? a.patientId,
           reason: a.reason,
           status: a.status,
-          birthday: isBirthday(a.patientId, a.start.slice(0, 10)),
+          birthday: await isBirthday(a.patientId, a.start.slice(0, 10)),
           estimated: a.start.slice(0, 10) === DEMO_TODAY ? estimatedFor(a.id) : undefined,
         },
-      }));
+      })),
+    );
 
-    const days = groupByDate(rows).map((d) => ({ ...d, free: freeSlotCount(pid, d.date) }));
+    const grouped = groupByDate(rows);
+    const days = await Promise.all(
+      grouped.map(async (d) => ({ ...d, free: await freeSlotCount(pid, d.date) })),
+    );
     return Response.json({ role: "medico", title: `Mi agenda · ${actor.activeOrg.name}`, days });
   }
 
   if (actor.role === "paciente" && actor.patientId) {
     const orgIds = actor.orgs.map((o) => o.id);
     const multiOrg = actor.orgs.length > 1;
-    const rows = getAppointmentsForPatient(actor.patientId, orgIds)
-      .filter(upcoming)
-      .map((a) => {
-        const prov = getProvider(a.providerId);
+    const appts = (await getAppointmentsForPatient(actor.patientId, orgIds)).filter(upcoming);
+    const rows = await Promise.all(
+      appts.map(async (a) => {
+        const prov = await getProvider(a.providerId);
         let estimated: string | undefined;
         if (a.start.slice(0, 10) === DEMO_TODAY) {
-          const ag = providerAgenda(a.providerId, DEMO_TODAY);
+          const ag = await providerAgenda(a.providerId, DEMO_TODAY);
           estimated = [ag.inAttention, ag.next, ...ag.upcoming].find((e) => e?.appointmentId === a.id)?.estimated;
         }
-        const orgName = getOrganization(a.organizationId)?.name ?? "";
+        const org = await getOrganization(a.organizationId);
+        const orgName = org?.name ?? "";
         return {
           date: a.start.slice(0, 10),
           item: {
@@ -82,7 +87,8 @@ export async function GET(req: Request) {
             estimated,
           },
         };
-      });
+      }),
+    );
     return Response.json({ role: "paciente", title: "Mis turnos", days: groupByDate(rows) });
   }
 

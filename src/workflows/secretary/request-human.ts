@@ -68,7 +68,7 @@ async function notifyHuman(args: RequestHumanArgs): Promise<PendingHumanRequest>
     }
   }
 
-  addPendingRequest(req);
+  await addPendingRequest(req);
   return req;
 }
 
@@ -90,5 +90,5 @@ async function finalizeHuman(
         }`;
 
   await updateResolvedMessage(req, outcome);
-  resolvePendingRequest(req.token, response);
+  await resolvePendingRequest(req.token, response);
 }

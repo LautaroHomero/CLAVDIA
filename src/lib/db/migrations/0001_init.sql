@@ -1,5 +1,10 @@
-/** DDL applied on every connection (all statements are idempotent). */
-export const SCHEMA = /* sql */ `
+-- CLAVDIA — initial Postgres schema.
+-- Translated from the SQLite `SCHEMA` + `migrate.ts` additive columns.
+-- Tables are ordered so every REFERENCES target already exists (Postgres is
+-- strict about forward references; SQLite was not). Booleans stay as INTEGER
+-- 0/1 to keep the row mappers unchanged. Timestamps / JSON stay as TEXT
+-- (ISO-8601 strings sort lexicographically; JSON is (de)serialised in JS).
+
 -- ── Multi-tenant core ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS organizations (
   id         TEXT PRIMARY KEY,
@@ -12,37 +17,6 @@ CREATE TABLE IF NOT EXISTS organizations (
   created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug_unique ON organizations (slug);
-
-CREATE TABLE IF NOT EXISTS users (
-  id       TEXT PRIMARY KEY,
-  name     TEXT NOT NULL,
-  email    TEXT NOT NULL DEFAULT '',    -- login identifier for every role
-  role     TEXT NOT NULL,               -- medico | recepcion | paciente
-  pin_hash TEXT NOT NULL,
-  pin_salt TEXT NOT NULL,
-  patient_id TEXT REFERENCES patients(id)  -- only for role = paciente
-);
-CREATE UNIQUE INDEX IF NOT EXISTS users_name_unique ON users (lower(trim(name)));
--- users_email_unique is created in migrate.ts (it references a column that older
--- databases don't have yet, so it can't live in this always-applied block).
-
--- A staff user's link to an organization (a professional can be in several).
-CREATE TABLE IF NOT EXISTS memberships (
-  user_id         TEXT NOT NULL REFERENCES users(id),
-  organization_id TEXT NOT NULL REFERENCES organizations(id),
-  role            TEXT NOT NULL,        -- medico | recepcion
-  provider_id     TEXT REFERENCES providers(id),  -- for medico: their provider record in that org
-  can_admin       INTEGER NOT NULL DEFAULT 0,     -- may onboard professionals / manage the org
-  PRIMARY KEY (user_id, organization_id)
-);
-
--- A patient's link to an organization (they can be treated at several).
-CREATE TABLE IF NOT EXISTS patient_organizations (
-  patient_id      TEXT NOT NULL REFERENCES patients(id),
-  organization_id TEXT NOT NULL REFERENCES organizations(id),
-  joined_at       TEXT NOT NULL,
-  PRIMARY KEY (patient_id, organization_id)
-);
 
 -- ── Global (per-person) records ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS patients (
@@ -57,6 +31,23 @@ CREATE TABLE IF NOT EXISTS patients (
   active_conditions TEXT NOT NULL DEFAULT '[]',
   notes             TEXT
 );
+
+CREATE TABLE IF NOT EXISTS users (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  email      TEXT NOT NULL DEFAULT '',   -- login identifier for every role
+  dni        TEXT NOT NULL DEFAULT '',   -- identity anchor: staff dedup + login + PIN recovery
+  phone      TEXT NOT NULL DEFAULT '',   -- for PIN recovery over WhatsApp
+  role       TEXT NOT NULL,              -- medico | recepcion | paciente
+  pin_hash   TEXT NOT NULL,              -- '' until the person sets a PIN via recovery
+  pin_salt   TEXT NOT NULL,
+  patient_id TEXT REFERENCES patients(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS users_name_unique ON users (lower(trim(name)));
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique
+  ON users (lower(trim(email))) WHERE trim(email) <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS users_dni_unique
+  ON users (replace(replace(trim(dni), '.', ''), ' ', '')) WHERE trim(dni) <> '';
 
 CREATE TABLE IF NOT EXISTS medications (
   id              TEXT PRIMARY KEY,
@@ -75,6 +66,22 @@ CREATE TABLE IF NOT EXISTS providers (
   specialty       TEXT NOT NULL,
   room_label      TEXT NOT NULL,
   default_fee     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS memberships (
+  user_id         TEXT NOT NULL REFERENCES users(id),
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  role            TEXT NOT NULL,        -- medico | recepcion
+  provider_id     TEXT REFERENCES providers(id),
+  can_admin       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, organization_id)
+);
+
+CREATE TABLE IF NOT EXISTS patient_organizations (
+  patient_id      TEXT NOT NULL REFERENCES patients(id),
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  joined_at       TEXT NOT NULL,
+  PRIMARY KEY (patient_id, organization_id)
 );
 
 CREATE TABLE IF NOT EXISTS provider_prices (
@@ -176,8 +183,7 @@ CREATE TABLE IF NOT EXISTS patient_notices (
   resolved        INTEGER NOT NULL DEFAULT 0
 );
 
--- Manual appointment changes a patient asked for that need staff sign-off
--- (only created when the provider's late_change_policy = 'needs_approval').
+-- Manual appointment changes a patient asked for that need staff sign-off.
 CREATE TABLE IF NOT EXISTS appointment_change_requests (
   id              TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id),
@@ -185,7 +191,7 @@ CREATE TABLE IF NOT EXISTS appointment_change_requests (
   provider_id     TEXT NOT NULL REFERENCES providers(id),
   patient_id      TEXT NOT NULL REFERENCES patients(id),
   kind            TEXT NOT NULL,                    -- cancel | reschedule
-  new_slot_id     TEXT,                             -- reschedule only
+  new_slot_id     TEXT,
   reason          TEXT,
   requested_by    TEXT NOT NULL,
   created_at      TEXT NOT NULL,
@@ -227,4 +233,18 @@ CREATE TABLE IF NOT EXISTS pending_requests (
   resolved_at     TEXT,
   response        TEXT
 );
-`;
+
+-- One-time codes for patient PIN recovery. Stored only as a salted hash.
+CREATE TABLE IF NOT EXISTS pin_reset_codes (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  code_hash   TEXT NOT NULL,
+  code_salt   TEXT NOT NULL,
+  channel     TEXT NOT NULL,               -- email | whatsapp
+  sent_to     TEXT NOT NULL,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS pin_reset_codes_user ON pin_reset_codes (user_id, created_at);

@@ -3,13 +3,13 @@ import { addMedication, getPatient, listMedications, patientInOrg } from "@/lib/
 
 /** Add a medication to a patient's ficha (staff, patient must be in the org). */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor || actor.role === "paciente") {
     return Response.json({ ok: false, error: "Solo personal del consultorio." }, { status: 403 });
   }
   const { id } = await ctx.params;
   const orgId = actor.activeOrg?.id;
-  if (!orgId || !getPatient(id) || !patientInOrg(id, orgId)) {
+  if (!orgId || !(await getPatient(id)) || !(await patientInOrg(id, orgId))) {
     return Response.json({ ok: false, error: "Ese paciente no está en este consultorio." }, { status: 403 });
   }
 
@@ -17,12 +17,12 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!body.name?.trim() || !body.dose?.trim()) {
     return Response.json({ ok: false, error: "Indicá nombre y dosis." }, { status: 400 });
   }
-  addMedication({
+  await addMedication({
     patientId: id,
     name: body.name,
     dose: body.dose,
     lastPrescribed: body.lastPrescribed,
     chronic: Boolean(body.chronic),
   });
-  return Response.json({ ok: true, medications: listMedications(id) });
+  return Response.json({ ok: true, medications: await listMedications(id) });
 }

@@ -35,20 +35,23 @@ function groupByDate<T>(rows: { date: string; item: T }[]): { date: string; labe
  * appointment controls need.
  */
 export async function GET(req: Request) {
-  const actor = actorFromRequest(req);
+  const actor = await actorFromRequest(req);
   if (!actor) return Response.json({ error: "No autenticado." }, { status: 401 });
 
   if (actor.role === "paciente" && actor.patientId) {
-    const p = getPatient(actor.patientId);
+    const p = await getPatient(actor.patientId);
     if (!p) return Response.json({ error: "Ficha no encontrada." }, { status: 404 });
 
     const orgIds = actor.orgs.map((o) => o.id);
     const multiOrg = actor.orgs.length > 1;
-    const rows = getAppointmentsForPatient(actor.patientId, orgIds)
-      .filter((a) => a.start.slice(0, 10) >= DEMO_TODAY && a.status !== "cancelled")
-      .map((a) => {
-        const prov = getProvider(a.providerId);
-        const orgName = getOrganization(a.organizationId)?.name ?? "";
+    const appts = (await getAppointmentsForPatient(actor.patientId, orgIds)).filter(
+      (a) => a.start.slice(0, 10) >= DEMO_TODAY && a.status !== "cancelled",
+    );
+    const rows = await Promise.all(
+      appts.map(async (a) => {
+        const prov = await getProvider(a.providerId);
+        const org = await getOrganization(a.organizationId);
+        const orgName = org?.name ?? "";
         return {
           date: a.start.slice(0, 10),
           item: {
@@ -60,10 +63,15 @@ export async function GET(req: Request) {
             providerId: a.providerId,
             organizationId: a.organizationId,
             startIso: a.start,
-            manage: manageFlags(actor, a),
+            manage: await manageFlags(actor, a),
           },
         };
-      });
+      }),
+    );
+
+    const changeRequests = await Promise.all(
+      (await listChangeRequests({ patientId: actor.patientId, status: "pending" })).map(changeRequestView),
+    );
 
     return Response.json({
       role: "paciente",
@@ -81,39 +89,51 @@ export async function GET(req: Request) {
       },
       orgs: actor.orgs.map((o) => ({ id: o.id, name: o.name })),
       calendar: { title: "Mis turnos", days: groupByDate(rows) },
-      changeRequests: listChangeRequests({ patientId: actor.patientId, status: "pending" }).map(changeRequestView),
+      changeRequests,
     });
   }
 
   // staff (medico / recepcion) — scoped to the active organization
   const orgId = actor.activeOrg?.id;
-  const org = orgId ? getOrganization(orgId) : undefined;
-  const providers = orgId ? listProviders(orgId) : [];
-  const rows = (orgId ? listAppointments(orgId) : [])
-    .filter((a) => a.start.slice(0, 10) >= DEMO_TODAY)
-    .map((a) => ({
-      date: a.start.slice(0, 10),
-      item: {
-        time: a.start.slice(11, 16),
-        who: getPatient(a.patientId)?.fullName ?? a.patientId,
-        provider: getProvider(a.providerId)?.name ?? a.providerId,
-        reason: a.reason,
-        status: a.status,
-        birthday: isBirthday(a.patientId, a.start.slice(0, 10)),
-        appointmentId: a.id,
-        providerId: a.providerId,
-        organizationId: a.organizationId,
-        startIso: a.start,
-        manage: manageFlags(actor, a),
-      },
-    }));
+  const org = orgId ? await getOrganization(orgId) : undefined;
+  const providers = orgId ? await listProviders(orgId) : [];
+  const staffAppts = (orgId ? await listAppointments(orgId) : []).filter(
+    (a) => a.start.slice(0, 10) >= DEMO_TODAY,
+  );
+  const rows = await Promise.all(
+    staffAppts.map(async (a) => {
+      const [patient, provider, birthday, manage] = await Promise.all([
+        getPatient(a.patientId),
+        getProvider(a.providerId),
+        isBirthday(a.patientId, a.start.slice(0, 10)),
+        manageFlags(actor, a),
+      ]);
+      return {
+        date: a.start.slice(0, 10),
+        item: {
+          time: a.start.slice(11, 16),
+          who: patient?.fullName ?? a.patientId,
+          provider: provider?.name ?? a.providerId,
+          reason: a.reason,
+          status: a.status,
+          birthday,
+          appointmentId: a.id,
+          providerId: a.providerId,
+          organizationId: a.organizationId,
+          startIso: a.start,
+          manage,
+        },
+      };
+    }),
+  );
 
-  const changeRequests =
+  const changeRequestsRaw =
     actor.role === "medico" && actor.activeOrg?.providerId
-      ? listChangeRequests({ providerId: actor.activeOrg.providerId, status: "pending" })
+      ? await listChangeRequests({ providerId: actor.activeOrg.providerId, status: "pending" })
       : orgId
-        ? listChangeRequests({ organizationId: orgId, status: "pending" })
+        ? await listChangeRequests({ organizationId: orgId, status: "pending" })
         : [];
+  const changeRequests = await Promise.all(changeRequestsRaw.map(changeRequestView));
 
   return Response.json({
     role: "staff",
@@ -130,8 +150,8 @@ export async function GET(req: Request) {
     calendar: { title: org ? `Agenda · ${org.name}` : "Agenda", days: groupByDate(rows) },
     providerSettings:
       actor.role === "medico" && actor.activeOrg?.providerId
-        ? getProviderSettings(actor.activeOrg.providerId)
+        ? await getProviderSettings(actor.activeOrg.providerId)
         : null,
-    changeRequests: changeRequests.map(changeRequestView),
+    changeRequests,
   });
 }

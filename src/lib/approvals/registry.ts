@@ -1,8 +1,8 @@
-import { getDb } from "@/lib/db/connection";
+import { getSql } from "@/lib/db/connection";
 import type { HumanResponse, PendingHumanRequest } from "./types";
 
 /**
- * The human-in-the-loop request queue, stored in SQLite so it is a single
+ * The human-in-the-loop request queue, stored in Postgres so it is a single
  * source of truth shared by the workflow steps, the web UI and the Slack
  * webhook (an in-memory map would not survive the workflow's per-step
  * route isolation).
@@ -32,72 +32,50 @@ function toPending(r: Row): PendingHumanRequest {
   };
 }
 
-export function addPendingRequest(req: PendingHumanRequest): void {
-  getDb()
-    .prepare(
-      `INSERT OR REPLACE INTO pending_requests
-        (token, organization_id, run_id, kind, action, summary, details, risk_level, patient_name,
-         question, requested_by, created_at, channels, slack_channel, slack_ts, status)
-       VALUES
-        (@token, @organization_id, @run_id, @kind, @action, @summary, @details, @risk_level, @patient_name,
-         @question, @requested_by, @created_at, @channels, @slack_channel, @slack_ts, 'open')`,
-    )
-    .run({
-      token: req.token,
-      organization_id: req.organizationId,
-      run_id: req.runId,
-      kind: req.kind,
-      action: req.action,
-      summary: req.summary,
-      details: req.details ?? null,
-      risk_level: req.riskLevel ?? null,
-      patient_name: req.patientName ?? null,
-      question: req.question ?? null,
-      requested_by: req.requestedBy ?? null,
-      created_at: req.createdAt,
-      channels: JSON.stringify(req.channels),
-      slack_channel: req.slack?.channel ?? null,
-      slack_ts: req.slack?.ts ?? null,
-    });
+export async function addPendingRequest(req: PendingHumanRequest): Promise<void> {
+  await getSql()`
+    INSERT INTO pending_requests
+      (token, organization_id, run_id, kind, action, summary, details, risk_level, patient_name,
+       question, requested_by, created_at, channels, slack_channel, slack_ts, status)
+    VALUES
+      (${req.token}, ${req.organizationId}, ${req.runId}, ${req.kind}, ${req.action}, ${req.summary},
+       ${req.details ?? null}, ${req.riskLevel ?? null}, ${req.patientName ?? null}, ${req.question ?? null},
+       ${req.requestedBy ?? null}, ${req.createdAt}, ${JSON.stringify(req.channels)},
+       ${req.slack?.channel ?? null}, ${req.slack?.ts ?? null}, 'open')
+    ON CONFLICT (token) DO UPDATE SET
+      organization_id = EXCLUDED.organization_id, run_id = EXCLUDED.run_id, kind = EXCLUDED.kind,
+      action = EXCLUDED.action, summary = EXCLUDED.summary, details = EXCLUDED.details,
+      risk_level = EXCLUDED.risk_level, patient_name = EXCLUDED.patient_name, question = EXCLUDED.question,
+      requested_by = EXCLUDED.requested_by, created_at = EXCLUDED.created_at, channels = EXCLUDED.channels,
+      slack_channel = EXCLUDED.slack_channel, slack_ts = EXCLUDED.slack_ts, status = 'open'`;
 }
 
-export function getPendingRequest(token: string): PendingHumanRequest | undefined {
-  const r = getDb()
-    .prepare("SELECT * FROM pending_requests WHERE token = ? AND status = 'open'")
-    .get(token) as Row | undefined;
+export async function getPendingRequest(token: string): Promise<PendingHumanRequest | undefined> {
+  const [r] = (await getSql()`
+    SELECT * FROM pending_requests WHERE token = ${token} AND status = 'open'`) as unknown as Row[];
   return r ? toPending(r) : undefined;
 }
 
-export function listPendingRequests(orgId?: string): PendingHumanRequest[] {
+export async function listPendingRequests(orgId?: string): Promise<PendingHumanRequest[]> {
+  const sql = getSql();
   const rows = orgId
-    ? (getDb()
-        .prepare("SELECT * FROM pending_requests WHERE status = 'open' AND organization_id = ? ORDER BY created_at")
-        .all(orgId) as Row[])
-    : (getDb()
-        .prepare("SELECT * FROM pending_requests WHERE status = 'open' ORDER BY created_at")
-        .all() as Row[]);
+    ? ((await sql`SELECT * FROM pending_requests WHERE status = 'open' AND organization_id = ${orgId} ORDER BY created_at`) as unknown as Row[])
+    : ((await sql`SELECT * FROM pending_requests WHERE status = 'open' ORDER BY created_at`) as unknown as Row[]);
   return rows.map(toPending);
 }
 
 /** Mark a request resolved (called after the hook is resumed). */
-export function resolvePendingRequest(
-  token: string,
-  response: HumanResponse,
-): void {
-  getDb()
-    .prepare(
-      `UPDATE pending_requests
-       SET status = 'resolved', resolved_by = ?, resolved_at = ?, response = ?
-       WHERE token = ?`,
-    )
-    .run(response.respondedBy ?? null, new Date().toISOString(), JSON.stringify(response), token);
+export async function resolvePendingRequest(token: string, response: HumanResponse): Promise<void> {
+  await getSql()`
+    UPDATE pending_requests
+    SET status = 'resolved', resolved_by = ${response.respondedBy ?? null},
+        resolved_at = ${new Date().toISOString()}, response = ${JSON.stringify(response)}
+    WHERE token = ${token}`;
 }
 
 /** Back-compat alias used by the workflow's finalize step. */
-export function removePendingRequest(token: string): void {
-  getDb()
-    .prepare(
-      "UPDATE pending_requests SET status = 'resolved', resolved_at = ? WHERE token = ? AND status = 'open'",
-    )
-    .run(new Date().toISOString(), token);
+export async function removePendingRequest(token: string): Promise<void> {
+  await getSql()`
+    UPDATE pending_requests SET status = 'resolved', resolved_at = ${new Date().toISOString()}
+    WHERE token = ${token} AND status = 'open'`;
 }
