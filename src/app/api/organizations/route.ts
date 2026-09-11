@@ -5,6 +5,7 @@ import {
   createUser,
   listOrganizations,
   organizationNameTaken,
+  setOrgAdmin,
   userEmailTaken,
 } from "@/lib/db/repo";
 import { hashPin } from "@/lib/auth/pin";
@@ -127,6 +128,9 @@ export async function POST(req: Request) {
     await addMembership({ userId: user.id, organizationId: org.id, role: "recepcion", canAdmin: true });
     userId = user.id;
   }
+
+  // Quien crea el consultorio es su admin por defecto (ver setOrgAdmin).
+  await setOrgAdmin(org.id, userId, true);
 
   const claims: SessionClaims = { userId, role: founderRole, activeOrgId: org.id };
   return Response.json(

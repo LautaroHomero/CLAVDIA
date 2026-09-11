@@ -141,6 +141,7 @@ export async function GET(req: Request) {
       ? { name: org.name, address: org.address, city: org.city, hours: org.hours, phone: org.phone }
       : null,
     me: {
+      userId: actor.userId,
       name: actor.name,
       role: actor.role,
       specialty: actor.activeOrg?.specialty ?? null,

@@ -42,7 +42,7 @@ type SystemData =
   | {
       role: "staff";
       organization: { name: string; address: string; city: string; hours: string; phone: string } | null;
-      me: { name: string; role: "medico" | "recepcion"; specialty: string | null; canAdmin: boolean };
+      me: { userId: string; name: string; role: "medico" | "recepcion"; specialty: string | null; canAdmin: boolean };
       providers: { id: string; name: string; specialty: string; roomLabel: string; active: boolean }[];
       calendar: CalData;
       providerSettings: ProviderSettings | null;
@@ -426,11 +426,104 @@ function ProfesionalesPanel({
         </div>
       )}
 
+      <AdminsPanel me={data.me} onDone={onDone} />
+
       <div className="max-w-md">
         <AddProfessional onDone={onDone} />
       </div>
 
       {data.providers.length === 0 && <OnboardingChecklist />}
+    </div>
+  );
+}
+
+type OrgMember = {
+  userId: string;
+  name: string;
+  email: string;
+  role: "medico" | "recepcion";
+  specialty?: string;
+  isAdmin: boolean;
+};
+
+/** Quién administra el consultorio — designar / quitar admins entre el equipo. */
+function AdminsPanel({
+  me,
+  onDone,
+}: {
+  me: { userId: string; canAdmin: boolean };
+  onDone: (msg: string) => void;
+}) {
+  const [members, setMembers] = useState<OrgMember[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/organizations/members")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!cancelled && d.ok) setMembers(d.members);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function toggle(member: OrgMember) {
+    const next = !member.isAdmin;
+    if (!next && member.userId === me.userId && !window.confirm("¿Quitarte a vos mismo/a como administrador/a?")) {
+      return;
+    }
+    setBusyId(member.userId);
+    setError("");
+    try {
+      const r = await fetch("/api/organizations/members", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userId: member.userId, isAdmin: next }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        setError(d.error ?? "No se pudo actualizar.");
+        return;
+      }
+      setMembers((prev) => prev?.map((m) => (m.userId === member.userId ? { ...m, isAdmin: next } : m)) ?? prev);
+      onDone(d.message ?? "Listo.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (!members) return null;
+
+  return (
+    <div className="space-y-2">
+      <h3 className="text-[14px] font-semibold tracking-tight text-ink">Administradores</h3>
+      <p className="text-[12px] text-muted">
+        Pueden dar de alta/baja al equipo y designar otros administradores.
+      </p>
+      <div className="divide-y divide-hairline rounded-lg border border-hairline">
+        {members.map((m) => (
+          <div key={m.userId} className="flex items-center justify-between gap-2 px-3.5 py-2.5">
+            <div>
+              <p className="text-[13px] font-medium text-ink">
+                {m.name}
+                {m.userId === me.userId && <span className="ml-1.5 text-[11px] font-normal text-muted">(vos)</span>}
+              </p>
+              <p className="text-[12px] text-muted">{m.role === "medico" ? m.specialty ?? "Médico/a" : "Recepción"}</p>
+            </div>
+            <button
+              className="shrink-0 text-[11px] font-medium text-muted hover:text-ink disabled:opacity-50"
+              disabled={busyId === m.userId}
+              onClick={() => toggle(m)}
+            >
+              {m.isAdmin ? "Quitar admin" : "Hacer admin"}
+            </button>
+          </div>
+        ))}
+      </div>
+      {error && <p className="text-[11px] text-[#c0392b]">{error}</p>}
     </div>
   );
 }

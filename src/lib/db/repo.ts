@@ -117,6 +117,7 @@ const toOrg = (r: Row): Organization => ({
   city: (r.city as string) ?? "",
   hours: r.hours as string,
   phone: r.phone as string,
+  adminIds: JSON.parse((r.admin_ids as string) || "[]"),
 });
 
 export async function listOrganizations(): Promise<Organization[]> {
@@ -162,6 +163,20 @@ export async function organizationNameTaken(name: string): Promise<boolean> {
   return rows.some((r) => normName(r.name as string) === t);
 }
 
+/**
+ * Otorga o quita el rol de administrador del consultorio a un usuario. No
+ * borra su membership ni su rol de médico/recepción — solo cambia si puede
+ * administrar (dar de alta/baja al equipo, designar otros admins, etc.).
+ */
+export async function setOrgAdmin(orgId: string, userId: string, isAdmin: boolean): Promise<void> {
+  const org = await getOrganization(orgId);
+  if (!org) return;
+  const next = new Set(org.adminIds);
+  if (isAdmin) next.add(userId);
+  else next.delete(userId);
+  await getSql()`UPDATE organizations SET admin_ids = ${JSON.stringify([...next])} WHERE id = ${orgId}`;
+}
+
 // ---------------------------------------------------------------------------
 // Users, memberships, auth
 // ---------------------------------------------------------------------------
@@ -187,20 +202,55 @@ export interface Membership {
 
 export async function membershipsForUser(userId: string): Promise<Membership[]> {
   const rows = (await getSql()`
-    SELECT m.organization_id, o.name AS org_name, m.role, m.provider_id, m.can_admin, p.specialty
+    SELECT m.organization_id, o.name AS org_name, o.admin_ids, m.role, m.provider_id, p.specialty
     FROM memberships m
     JOIN organizations o ON o.id = m.organization_id
     LEFT JOIN providers p ON p.id = m.provider_id
     WHERE m.user_id = ${userId}
     ORDER BY o.name`) as unknown as Row[];
+  return rows.map((r) => {
+    const adminIds: string[] = JSON.parse((r.admin_ids as string) || "[]");
+    return {
+      organizationId: r.organization_id as string,
+      organizationName: r.org_name as string,
+      role: r.role as StaffRole,
+      providerId: (r.provider_id as string) ?? undefined,
+      specialty: (r.specialty as string) ?? undefined,
+      // Admin viene de organizations.admin_ids, no del rol — ver setOrgAdmin.
+      canAdmin: adminIds.includes(userId),
+    };
+  });
+}
+
+export interface OrgMember {
+  userId: string;
+  name: string;
+  email: string;
+  role: StaffRole;
+  providerId?: string;
+  specialty?: string;
+  isAdmin: boolean;
+}
+
+/** Todo el equipo (médicos + recepción) del consultorio, con quién administra. */
+export async function listOrgMembers(orgId: string): Promise<OrgMember[]> {
+  const org = await getOrganization(orgId);
+  const adminIds = new Set(org?.adminIds ?? []);
+  const rows = (await getSql()`
+    SELECT u.id AS user_id, u.name, u.email, m.role, m.provider_id, p.specialty
+    FROM memberships m
+    JOIN users u ON u.id = m.user_id
+    LEFT JOIN providers p ON p.id = m.provider_id
+    WHERE m.organization_id = ${orgId}
+    ORDER BY u.name`) as unknown as Row[];
   return rows.map((r) => ({
-    organizationId: r.organization_id as string,
-    organizationName: r.org_name as string,
+    userId: r.user_id as string,
+    name: r.name as string,
+    email: (r.email as string) ?? "",
     role: r.role as StaffRole,
     providerId: (r.provider_id as string) ?? undefined,
     specialty: (r.specialty as string) ?? undefined,
-    // secretaría always administers; a médico only if flagged (org founder).
-    canAdmin: Boolean(r.can_admin) || (r.role as StaffRole) === "recepcion",
+    isAdmin: adminIds.has(r.user_id as string),
   }));
 }
 
@@ -446,7 +496,7 @@ export async function listProviders(
   const rows = (await getSql()`
     SELECT * FROM providers
     WHERE organization_id = ${orgId}
-      AND (${opts.activeOnly ?? false} = false OR active = true)
+      AND (${opts.activeOnly ? 1 : 0} = 0 OR active = 1)
     ORDER BY name`) as unknown as Row[];
   return rows.map(toProvider);
 }
@@ -462,7 +512,7 @@ export async function getProvider(id: string): Promise<Provider | undefined> {
  * historial (turnos, facturas, informes) sigue intacto y visible.
  */
 export async function setProviderActive(id: string, active: boolean): Promise<void> {
-  await getSql()`UPDATE providers SET active = ${active} WHERE id = ${id}`;
+  await getSql()`UPDATE providers SET active = ${active ? 1 : 0} WHERE id = ${id}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -879,7 +929,7 @@ export async function listOpenSlots(
   const rows = (await getSql()`
     SELECT s.* FROM slots s
     JOIN providers p ON p.id = s.provider_id
-    WHERE s.organization_id = ${orgId} AND s.taken = 0 AND p.active = true
+    WHERE s.organization_id = ${orgId} AND s.taken = 0 AND p.active = 1
       AND (${opts.providerId ?? null}::text IS NULL OR s.provider_id = ${opts.providerId ?? null})
       AND (${opts.date ?? null}::text IS NULL OR substr(s.start, 1, 10) = ${opts.date ?? null})
     ORDER BY s.start`) as unknown as Row[];

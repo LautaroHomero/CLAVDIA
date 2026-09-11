@@ -14,6 +14,8 @@ export interface Organization {
   city: string;
   hours: string;
   phone: string;
+  /** User ids who administer this org. Default: whoever creates it; an admin can add others. */
+  adminIds: string[];
 }
 
 export interface OrgRef {

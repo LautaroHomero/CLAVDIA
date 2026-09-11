@@ -19,7 +19,6 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
       { status: 403 },
     );
   }
-
   const { id } = await ctx.params;
   const provider = await getProvider(id);
   if (!provider) return Response.json({ ok: false, error: "Profesional no encontrado." }, { status: 404 });
