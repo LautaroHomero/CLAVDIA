@@ -536,7 +536,7 @@ entorno — dev / test / prod), accedida de forma async con
 [`src/lib/db/connection.ts`](src/lib/db/connection.ts). El schema **no** corre
 en el path de request: son migraciones `.sql` versionadas en
 [`src/lib/db/migrations/`](src/lib/db/migrations/), aplicadas con
-`npm run db:migrate` ([`scripts/migrate.ts`](scripts/migrate.ts), runner en
+`npm run db:migrate` ([`scripts/migrate.mts`](scripts/migrate.mts), runner en
 [`src/lib/db/migrate.ts`](src/lib/db/migrate.ts)). Todas las queries pasan por
 [`src/lib/db/repo.ts`](src/lib/db/repo.ts) (async de punta a punta). No hay
 seed local ni datos embebidos en el repo — cada entorno **es** un proyecto de
@@ -586,12 +586,15 @@ npm run dev                          # http://localhost:3000
 ```
 
 `DATABASE_URL` / `DATABASE_URL_DIRECT` salen del proyecto de Supabase en
-Settings → Database (connection string pooled y directa respectivamente — ver
-[`.env.example`](.env.example)); apuntar esas dos variables a otro proyecto es
-todo lo que hace falta para moverse entre dev / test / prod, el código no sabe
-en qué entorno está. No hay seed local: la data (organizaciones, profesionales,
-pacientes de ejemplo) ya vive cargada en cada proyecto de Supabase — entrá y
-elegí un usuario de la tabla de arriba. Para agregar una
+Settings → Database → **Connect**: `DATABASE_URL` es el **Transaction pooler**
+(puerto 6543) y `DATABASE_URL_DIRECT` el **Session pooler** (puerto 5432, mismo
+host). **No uses "Direct connection"**: ese host es IPv6-only (sin registro A) y
+tira `CONNECT_TIMEOUT` en la mayoría de las redes hogareñas/de oficina — ver
+[`.env.example`](.env.example) para el formato exacto. Apuntar las dos variables
+a otro proyecto es todo lo que hace falta para moverse entre dev / test / prod,
+el código no sabe en qué entorno está. No hay seed local: la data (organizaciones,
+profesionales, pacientes de ejemplo) ya vive cargada en cada proyecto de Supabase
+— entrá y elegí un usuario de la tabla de arriba. Para agregar una
 migración nueva: un archivo `NNNN_algo.sql` en `src/lib/db/migrations/` y
 `npm run db:migrate` en cada entorno.
 
@@ -603,7 +606,7 @@ migración nueva: un archivo `NNNN_algo.sql` en `src/lib/db/migrations/` y
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | ✅ | Modelo del agente. https://console.anthropic.com |
 | `DATABASE_URL` | ✅ | Connection string **pooled** de Supabase (puerto 6543) — la usa la app en runtime. |
-| `DATABASE_URL_DIRECT` | ✅ para migrar | Connection string **directa** de Supabase (puerto 5432) — solo la usa `npm run db:migrate`. |
+| `DATABASE_URL_DIRECT` | ✅ para migrar | **Session pooler** de Supabase (puerto 5432, no "Direct connection" — ver nota arriba) — solo la usa `npm run db:migrate`. |
 | `AUTH_SECRET` | ✅ en prod | Firma la cookie de sesión (HMAC). En dev cae a un default; **en producción es obligatoria** y debe medir ≥ 32 chars random o la app no arranca (`openssl rand -base64 48`). |
 | `AGENT_MODEL` | — | Id de modelo Anthropic. Default `claude-haiku-4-5-20251001` (barato para probar; se puede subir a `claude-sonnet-4-5`). |
 | `NOTIFY_TRANSPORT` | — | Canal de salida de los códigos de recuperación de PIN. Default `log` (los imprime en la consola del server — alcanza para dev y un primer deploy). `resend` / `twilio` se implementan en [`src/lib/notify`](src/lib/notify) y se activan acá (con `RESEND_API_KEY` / `TWILIO_*`). |

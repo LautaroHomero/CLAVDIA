@@ -6,7 +6,7 @@ import postgres from "postgres";
  *
  * - `DATABASE_URL` is the **pooled** connection string (Supabase transaction
  *   pooler, port 6543). `prepare: false` is required for that pooler.
- * - Schema lives out-of-band: `npm run db:migrate` (see `scripts/migrate.ts`),
+ * - Schema lives out-of-band: `npm run db:migrate` (see `scripts/migrate.mts`),
  *   never on the request path. There is no local seed — every environment
  *   (dev/test/prod) is a real Supabase project; its data lives there, not in
  *   this repo.

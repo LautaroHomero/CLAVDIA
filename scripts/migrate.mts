@@ -1,6 +1,11 @@
-import "dotenv/config";
+import { config } from "dotenv";
 import postgres from "postgres";
 import { migrate } from "../src/lib/db/migrate";
+
+// `dotenv/config` only reads `.env`; this project (like Next.js) keeps real
+// values in `.env.local`. Load both, `.env.local` taking precedence.
+config({ path: ".env" });
+config({ path: ".env.local", override: true });
 
 const url = process.env.DATABASE_URL_DIRECT ?? process.env.DATABASE_URL;
 if (!url) {

@@ -7,7 +7,7 @@ import type { Sql } from "./connection";
  * file that hasn't run yet, in filename order, each in its own transaction,
  * recording it in `_migrations`. Idempotent: a second run does nothing.
  *
- * Run it with `npm run db:migrate` (see `scripts/migrate.ts`), pointing
+ * Run it with `npm run db:migrate` (see `scripts/migrate.mts`), pointing
  * `DATABASE_URL_DIRECT` at the target environment.
  */
 const MIGRATIONS_DIR = join(process.cwd(), "src/lib/db/migrations");

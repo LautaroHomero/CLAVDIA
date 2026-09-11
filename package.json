@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "db:migrate": "tsx scripts/migrate.ts"
+    "db:migrate": "tsx scripts/migrate.mts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.50",
