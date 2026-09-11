@@ -97,13 +97,18 @@ export async function secretaryWorkflow(messages: UIMessage[], actor: Actor) {
 
   const agent = new DurableAgent({
     model: anthropic(MODEL),
-    // A `SystemModelMessage` (not a bare string) so the whole prompt + the tool
-    // schemas render as one cached prefix — re-read at 0.1x on every later step.
-    instructions: {
-      role: "system",
-      content: instructions + DATE_CONTEXT + identity,
-      providerOptions: CACHE_PREFIX,
-    },
+    // Two system blocks, not one. The first (base + role doc + date) is
+    // byte-identical for every actor sharing a role, so it's the same cache
+    // entry for the whole team — one write serves everyone with that role,
+    // not one write per person. `identity` (this user's name/org) is
+    // per-actor and would otherwise poison that shared prefix if concatenated
+    // in: mixing it in meant every distinct person paid their own full
+    // instructions+tools cache write. It's small and uncached — cheap either
+    // way — appended as its own trailing block instead.
+    instructions: [
+      { role: "system", content: instructions + DATE_CONTEXT, providerOptions: CACHE_PREFIX },
+      ...(identity ? [{ role: "system", content: identity } as const] : []),
+    ],
     tools: secretaryTools,
   });
 

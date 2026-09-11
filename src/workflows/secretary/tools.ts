@@ -393,7 +393,7 @@ async function findPatientStep({ query }: { query: string }, ctx: ToolCtx) {
   const orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización activa." };
   const matches = await searchPatients(orgId, query);
-  return {
+  const result = {
     count: matches.length,
     matches: matches.map((p) => ({
       patientId: p.id,
@@ -403,6 +403,14 @@ async function findPatientStep({ query }: { query: string }, ctx: ToolCtx) {
       coverage: p.coverage,
     })),
   };
+  // Única coincidencia → el llamado siguiente iba a ser getPatientBriefing sí o
+  // sí (instructions.md §1); lo adelantamos acá y nos ahorramos ese round-trip
+  // completo al modelo. Con 0 o >1 coincidencias no hay paciente identificado
+  // todavía (toca askHumanInput), así que no tiene sentido calcularlo.
+  if (matches.length === 1) {
+    return { ...result, briefing: await buildPatientBriefing(matches[0].id, orgId) };
+  }
+  return result;
 }
 
 async function patientBriefingStep({ patientId }: { patientId: string }, ctx: ToolCtx) {
@@ -1042,7 +1050,7 @@ export const secretaryTools = {
 
   findPatient: {
     description:
-      "Busca pacientes de ESTE consultorio por nombre, DNI, email o id. Si hay 0 o más de 1 coincidencia, no adivines: usá askHumanInput.",
+      "Busca pacientes de ESTE consultorio por nombre, DNI, email o id. Si hay 0 o más de 1 coincidencia, no adivines: usá askHumanInput. Si hay una sola, la respuesta ya incluye su `briefing` (no llames getPatientBriefing de nuevo para ese paciente).",
     inputSchema: z.object({ query: z.string().describe("Nombre, DNI, email o id") }),
     execute: findPatientStep,
   },
