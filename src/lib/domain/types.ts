@@ -110,6 +110,30 @@ export interface PriceItem {
   amount: number;
 }
 
+/** One bookable time window, 'HH:MM' bounds. */
+export interface TimeWindow {
+  startTime: string;
+  endTime: string;
+}
+
+/** One franja of a professional's recurring weekly pattern. */
+export interface ScheduleRule extends TimeWindow {
+  id: string;
+  providerId: string;
+  weekday: number; // 0=domingo … 6=sábado (Date#getDay())
+}
+
+/**
+ * A specific date's schedule, overriding the weekly pattern entirely for
+ * that date — either its own franjas, or `closed: true` (no atiende).
+ */
+export interface ScheduleOverride {
+  date: ISODate;
+  providerId: string;
+  closed: boolean;
+  windows: TimeWindow[]; // empty when closed
+}
+
 /** Who may change appointments on a professional's agenda by hand. */
 export type WhoCanChange = "anyone" | "staff_only";
 /** What happens to a patient's manual change requested with < 24 h notice. */

@@ -1,5 +1,5 @@
 import { getUser, membershipsForUser, patientOrgs } from "@/lib/db/repo";
-import type { Actor } from "@/lib/domain/types";
+import type { Actor, Provider } from "@/lib/domain/types";
 import { claimsFromRequest, type SessionClaims } from "./session";
 
 /** Turns the signed session claims into the full Actor (memberships, org names…). */
@@ -40,4 +40,15 @@ export async function hydrateActor(claims: SessionClaims | null): Promise<Actor 
 
 export function actorFromRequest(req: Request): Promise<Actor | null> {
   return hydrateActor(claimsFromRequest(req));
+}
+
+/**
+ * Puede editar el horario de trabajo de `provider`: el propio médico sobre su
+ * agenda, o secretaría/admin de la organización sobre la de cualquiera del
+ * equipo — mismo gate que ya usa la pestaña "Profesionales" (`canAdmin`).
+ */
+export function canEditProviderSchedule(actor: Actor, provider: Provider): boolean {
+  if (!actor.activeOrg || provider.organizationId !== actor.activeOrg.id) return false;
+  const isSelf = actor.role === "medico" && actor.activeOrg.providerId === provider.id;
+  return isSelf || actor.activeOrg.canAdmin;
 }

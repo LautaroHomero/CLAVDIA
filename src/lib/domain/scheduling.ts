@@ -6,6 +6,7 @@
  * keeps the live-agenda notices in sync.
  */
 import { DEMO_TODAY } from "@/lib/domain/clock";
+import { notifyAppointmentBooked, notifyAppointmentCancelled } from "@/lib/domain/appointment-notifications";
 import {
   bookSlot,
   cancelAppointmentById,
@@ -77,6 +78,7 @@ export async function bookAppointment(args: {
     const appointment = await bookSlot(args);
     const price = await priceForReason(appointment.providerId, args.reason);
     await setAppointmentPrice(appointment.id, price);
+    await notifyAppointmentBooked(appointment);
     return { ok: true, appointment, price };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -93,6 +95,7 @@ export async function cancelAppointment(
   }
   const appointment = await cancelAppointmentById(appointmentId);
   await clearNoticesForAppointment(appointmentId);
+  await notifyAppointmentCancelled(appointment);
   const notices = existing.start.startsWith(DEMO_TODAY)
     ? await refreshWaitingNotices(existing.organizationId, existing.providerId)
     : [];

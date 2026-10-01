@@ -43,3 +43,15 @@ export function shiftIso(isoStr: string, minutes: number): string {
   d.setMinutes(d.getMinutes() + minutes, 0, 0);
   return iso(d);
 }
+
+/**
+ * La hora real del sistema **en el momento del llamado** — a diferencia de
+ * `NOW`/`DEMO_TODAY`/`demoHalfHourFloor`, que quedan fijos desde que arrancó
+ * el proceso. Usarla para cualquier chequeo de "¿ya pasó este horario?" en el
+ * camino de reserva (`listOpenSlots`/`bookSlot` en `repo.ts`) — si no, un
+ * slot generado a la mañana sigue apareciendo reservable a la tarde aunque ya
+ * haya pasado, porque nada lo vuelve a evaluar mientras el server sigue arriba.
+ */
+export function realNowIso(): string {
+  return iso(new Date());
+}

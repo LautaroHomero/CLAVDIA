@@ -16,13 +16,15 @@ import type {
   Provider,
   ProviderSettings,
   Role,
+  ScheduleOverride,
+  ScheduleRule,
   Slot,
   StaffRole,
   User,
 } from "@/lib/domain/types";
-import { DEMO_TODAY } from "@/lib/domain/clock";
+import { DEMO_TODAY, demoHalfHourFloor, realNowIso } from "@/lib/domain/clock";
 import { getSql } from "./connection";
-import { generateSlotRows } from "./slots";
+import { DEFAULT_SLOT_MINUTES, DEFAULT_WINDOW_DAYS, desiredSlots, validateWindows } from "./slots";
 
 const TODAY = DEMO_TODAY;
 type Row = Record<string, unknown>;
@@ -506,6 +508,12 @@ export async function getProvider(id: string): Promise<Provider | undefined> {
   return r ? toProvider(r) : undefined;
 }
 
+/** Todos los profesionales activos de todas las organizaciones — para el cron que rueda la agenda. */
+export async function listAllActiveProviders(): Promise<Provider[]> {
+  const rows = (await getSql()`SELECT * FROM providers WHERE active = 1 ORDER BY organization_id, name`) as unknown as Row[];
+  return rows.map(toProvider);
+}
+
 /**
  * Dar de baja / reactivar un profesional. No borra nada: un profesional
  * inactivo deja de ofrecer turnos nuevos (ver `listOpenSlots`) pero su
@@ -545,6 +553,199 @@ export async function setProviderSettings(
     ON CONFLICT (provider_id)
     DO UPDATE SET who_can_change = EXCLUDED.who_can_change, late_change_policy = EXCLUDED.late_change_policy`;
   return next;
+}
+
+// ---------------------------------------------------------------------------
+// Provider schedule — patrón semanal recurrente + overrides puntuales por
+// fecha, que juntos determinan qué `slots` existen (ver `regenerateProviderSlots`).
+// ---------------------------------------------------------------------------
+
+const toScheduleRule = (r: Row): ScheduleRule => ({
+  id: r.id as string,
+  providerId: r.provider_id as string,
+  weekday: Number(r.weekday),
+  startTime: r.start_time as string,
+  endTime: r.end_time as string,
+});
+
+const addDaysStr = (dateStr: string, n: number): string => {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+export async function listWeeklyScheduleRules(providerId: string): Promise<ScheduleRule[]> {
+  const rows = (await getSql()`
+    SELECT * FROM provider_schedule_rules WHERE provider_id = ${providerId} ORDER BY weekday, start_time`) as unknown as Row[];
+  return rows.map(toScheduleRule);
+}
+
+/** Reemplaza todo el patrón semanal de un profesional (delete-all + insert-all, una sola vez guardado). */
+export async function replaceWeeklyScheduleRules(
+  providerId: string,
+  organizationId: string,
+  rules: { weekday: number; startTime: string; endTime: string }[],
+): Promise<ScheduleRule[]> {
+  for (const r of rules) {
+    if (!Number.isInteger(r.weekday) || r.weekday < 0 || r.weekday > 6) {
+      throw new Error(`Día de la semana inválido: ${r.weekday}.`);
+    }
+  }
+  for (let weekday = 0; weekday <= 6; weekday++) {
+    const err = validateWindows(rules.filter((r) => r.weekday === weekday));
+    if (err) throw new Error(err);
+  }
+
+  const sql = getSql();
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM provider_schedule_rules WHERE provider_id = ${providerId}`;
+    if (rules.length > 0) {
+      const rows = rules.map((r) => ({
+        id: uid("shr"),
+        organization_id: organizationId,
+        provider_id: providerId,
+        weekday: r.weekday,
+        start_time: r.startTime,
+        end_time: r.endTime,
+      }));
+      await tx`INSERT INTO provider_schedule_rules ${tx(rows)}`;
+    }
+  });
+  return listWeeklyScheduleRules(providerId);
+}
+
+/** Overrides puntuales de un profesional en `[from, to]` (fechas inclusive, formato YYYY-MM-DD), agrupados por fecha. */
+export async function listScheduleOverrides(
+  providerId: string,
+  opts: { from?: string; to?: string } = {},
+): Promise<ScheduleOverride[]> {
+  const rows = (await getSql()`
+    SELECT * FROM provider_schedule_overrides
+    WHERE provider_id = ${providerId}
+      AND (${opts.from ?? null}::text IS NULL OR date >= ${opts.from ?? null})
+      AND (${opts.to ?? null}::text IS NULL OR date <= ${opts.to ?? null})
+    ORDER BY date, start_time`) as unknown as Row[];
+
+  const byDate = new Map<string, Row[]>();
+  for (const r of rows) {
+    const date = r.date as string;
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date)!.push(r);
+  }
+  return [...byDate.entries()].map(([date, rs]) => {
+    const closed = rs.some((r) => Boolean(r.closed));
+    return {
+      date,
+      providerId,
+      closed,
+      windows: closed ? [] : rs.map((r) => ({ startTime: r.start_time as string, endTime: r.end_time as string })),
+    };
+  });
+}
+
+/** Define el horario de una fecha puntual: franjas propias, o `{closed:true}` (no atiende ese día). */
+export async function setScheduleOverrideForDate(
+  providerId: string,
+  organizationId: string,
+  date: string,
+  spec: { closed: true } | { windows: { startTime: string; endTime: string }[] },
+): Promise<ScheduleOverride> {
+  if ("windows" in spec) {
+    if (spec.windows.length === 0) throw new Error("Indicá al menos una franja, o marcá el día como cerrado.");
+    const err = validateWindows(spec.windows);
+    if (err) throw new Error(err);
+  }
+
+  const sql = getSql();
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM provider_schedule_overrides WHERE provider_id = ${providerId} AND date = ${date}`;
+    if ("closed" in spec) {
+      await tx`
+        INSERT INTO provider_schedule_overrides (id, organization_id, provider_id, date, closed)
+        VALUES (${uid("sov")}, ${organizationId}, ${providerId}, ${date}, 1)`;
+    } else {
+      const rows = spec.windows.map((w) => ({
+        id: uid("sov"),
+        organization_id: organizationId,
+        provider_id: providerId,
+        date,
+        start_time: w.startTime,
+        end_time: w.endTime,
+        closed: 0,
+      }));
+      await tx`INSERT INTO provider_schedule_overrides ${tx(rows)}`;
+    }
+  });
+  return (await listScheduleOverrides(providerId, { from: date, to: date }))[0];
+}
+
+/** Quita el override de una fecha puntual: ese día vuelve a regirse por el patrón semanal. */
+export async function clearScheduleOverrideForDate(providerId: string, date: string): Promise<void> {
+  await getSql()`DELETE FROM provider_schedule_overrides WHERE provider_id = ${providerId} AND date = ${date}`;
+}
+
+/**
+ * Reconcilia los `slots` materializados de un profesional con su horario
+ * configurado (patrón semanal + overrides), para la ventana
+ * `[fromDate, fromDate + days)`. Los turnos ya tomados (`taken=1`) NUNCA se
+ * tocan aunque ya no encajen en el horario nuevo: `cancelAppointmentById`
+ * reabre un slot buscándolo por `provider_id`+`start`, así que esa fila tiene
+ * que seguir existiendo. Devuelve cuántos quedaron en conflicto para que la
+ * UI avise, sin bloquear ni cancelar nada automáticamente.
+ */
+export async function regenerateProviderSlots(
+  providerId: string,
+  organizationId: string,
+  opts: { fromDate?: string; nowIso?: string; days?: number } = {},
+): Promise<{ created: number; removed: number; conflicts: number }> {
+  const fromDate = opts.fromDate ?? TODAY;
+  const nowIso = opts.nowIso ?? demoHalfHourFloor();
+  const days = opts.days ?? DEFAULT_WINDOW_DAYS;
+  const toDateExclusive = addDaysStr(fromDate, days);
+
+  const [rules, overrides] = await Promise.all([
+    listWeeklyScheduleRules(providerId),
+    listScheduleOverrides(providerId, { from: fromDate, to: toDateExclusive }),
+  ]);
+  const desired = desiredSlots(providerId, rules, overrides, { fromDate, notBeforeToday: nowIso, days });
+  const desiredIds = new Set(desired.map((s) => s.id));
+  // Sin el corte de "a partir de ahora" — solo para juzgar turnos YA TOMADOS
+  // contra el horario configurado; si no, un turno de hoy más temprano que
+  // "ahora" se marcaría como "conflicto" únicamente por haber pasado la hora,
+  // no porque el horario lo excluya.
+  const scheduleIds = new Set(
+    desiredSlots(providerId, rules, overrides, { fromDate, notBeforeToday: fromDate + "T00:00:00", days }).map(
+      (s) => s.id,
+    ),
+  );
+
+  const sql = getSql();
+  const existing = (await sql`
+    SELECT id, taken FROM slots
+    WHERE provider_id = ${providerId}
+      AND start >= ${fromDate + "T00:00:00"} AND start < ${toDateExclusive + "T00:00:00"}`) as unknown as Row[];
+  const existingIds = new Set(existing.map((r) => r.id as string));
+
+  const toInsert = desired.filter((s) => !existingIds.has(s.id));
+  const toDelete = existing.filter((r) => !Boolean(r.taken) && !desiredIds.has(r.id as string)).map((r) => r.id as string);
+  const conflicts = existing.filter((r) => Boolean(r.taken) && !scheduleIds.has(r.id as string)).length;
+
+  await sql.begin(async (tx) => {
+    if (toDelete.length > 0) await tx`DELETE FROM slots WHERE id = ANY(${toDelete})`;
+    if (toInsert.length > 0) {
+      const rows = toInsert.map((s) => ({
+        id: s.id,
+        organization_id: organizationId,
+        provider_id: s.providerId,
+        start: s.start,
+        duration_minutes: DEFAULT_SLOT_MINUTES,
+        taken: 0,
+      }));
+      await tx`INSERT INTO slots ${tx(rows)}`;
+    }
+  });
+
+  return { created: toInsert.length, removed: toDelete.length, conflicts };
 }
 
 // ---------------------------------------------------------------------------
@@ -663,11 +864,17 @@ export async function createProfessional(args: {
       INSERT INTO providers (id, organization_id, name, specialty, room_label, default_fee)
       VALUES (${providerId}, ${args.organizationId}, ${args.name.trim()}, ${args.specialty.trim()}, ${args.roomLabel.trim()}, 0)`;
 
-    const slotRows = generateSlotRows(providerId).map((s) => ({
-      id: s.id, organization_id: args.organizationId, provider_id: s.providerId,
-      start: s.start, duration_minutes: 30, taken: 0,
+    // Horario por defecto para un profesional nuevo: Lun-Vie 09:00–13:00,
+    // editable después desde "Mi perfil" / "Profesionales".
+    const defaultRules = [1, 2, 3, 4, 5].map((weekday) => ({
+      id: uid("shr"),
+      organization_id: args.organizationId,
+      provider_id: providerId,
+      weekday,
+      start_time: "09:00",
+      end_time: "13:00",
     }));
-    await tx`INSERT INTO slots ${tx(slotRows)}`;
+    await tx`INSERT INTO provider_schedule_rules ${tx(defaultRules)}`;
 
     if (!existingUser) {
       await tx`
@@ -682,6 +889,7 @@ export async function createProfessional(args: {
       DO UPDATE SET role = 'medico', provider_id = EXCLUDED.provider_id, can_admin = EXCLUDED.can_admin`;
   });
 
+  await regenerateProviderSlots(providerId, args.organizationId);
   return { provider: (await getProvider(providerId))!, userId, reusedUser };
 }
 
@@ -926,10 +1134,14 @@ export async function listOpenSlots(
 ): Promise<Slot[]> {
   // Excluye slots de profesionales dados de baja: no se ofrecen turnos nuevos
   // con ellos, aunque sus turnos ya tomados sigan intactos en `appointments`.
+  // También excluye horarios que ya pasaron: un slot generado a la mañana no
+  // debe seguir ofreciéndose a la tarde solo porque nadie lo regeneró todavía
+  // (la regeneración es diaria, no continua) — se compara contra la hora real
+  // del sistema en cada consulta, no contra el reloj congelado de la demo.
   const rows = (await getSql()`
     SELECT s.* FROM slots s
     JOIN providers p ON p.id = s.provider_id
-    WHERE s.organization_id = ${orgId} AND s.taken = 0 AND p.active = 1
+    WHERE s.organization_id = ${orgId} AND s.taken = 0 AND p.active = 1 AND s.start >= ${realNowIso()}
       AND (${opts.providerId ?? null}::text IS NULL OR s.provider_id = ${opts.providerId ?? null})
       AND (${opts.date ?? null}::text IS NULL OR substr(s.start, 1, 10) = ${opts.date ?? null})
     ORDER BY s.start`) as unknown as Row[];
@@ -944,7 +1156,7 @@ export async function getSlot(id: string): Promise<Slot | undefined> {
 export async function freeSlotCount(providerId: string, date: string): Promise<number> {
   const [r] = (await getSql()`
     SELECT count(*)::int AS n FROM slots
-    WHERE provider_id = ${providerId} AND taken = 0 AND substr(start, 1, 10) = ${date}`) as unknown as Row[];
+    WHERE provider_id = ${providerId} AND taken = 0 AND substr(start, 1, 10) = ${date} AND start >= ${realNowIso()}`) as unknown as Row[];
   return Number(r?.n ?? 0);
 }
 
@@ -990,6 +1202,7 @@ export async function bookSlot(args: {
     const [slot] = (await tx`SELECT * FROM slots WHERE id = ${args.slotId} FOR UPDATE`) as unknown as Row[];
     if (!slot) throw new Error(`El horario ${args.slotId} no existe.`);
     if (Boolean(slot.taken)) throw new Error(`El horario ${args.slotId} ya está ocupado.`);
+    if ((slot.start as string) < realNowIso()) throw new Error(`El horario ${args.slotId} ya pasó.`);
     await tx`UPDATE slots SET taken = 1 WHERE id = ${args.slotId}`;
     await tx`
       INSERT INTO appointments (id, organization_id, patient_id, provider_id, start, duration_minutes, reason, status, created_via)
@@ -1006,6 +1219,32 @@ export async function cancelAppointmentById(id: string): Promise<Appointment> {
   await sql`UPDATE appointments SET status = 'cancelled' WHERE id = ${id}`;
   await sql`UPDATE slots SET taken = 0 WHERE provider_id = ${apt.providerId} AND start = ${apt.start}`;
   return (await getAppointment(id))!;
+}
+
+/**
+ * Scheduled turnos starting within `[windowStart, windowEnd]` (inclusive,
+ * same naive local format as `appointments.start`) that haven't had a
+ * reminder sent yet. Deliberately not scoped to one organization — the
+ * reminders cron sweeps every org in one pass; each appointment still
+ * carries its own `organizationId` for the caller to resolve org-specific
+ * details (name, address) per row.
+ */
+export async function appointmentsNeedingReminder(
+  windowStart: string,
+  windowEnd: string,
+): Promise<Appointment[]> {
+  const rows = (await getSql()`
+    SELECT * FROM appointments
+    WHERE status = 'scheduled'
+      AND reminder_sent_at IS NULL
+      AND start >= ${windowStart}
+      AND start <= ${windowEnd}
+    ORDER BY start`) as unknown as Row[];
+  return rows.map(toAppointment);
+}
+
+export async function markReminderSent(id: string): Promise<void> {
+  await getSql()`UPDATE appointments SET reminder_sent_at = ${new Date().toISOString()} WHERE id = ${id}`;
 }
 
 export async function createPrescriptionRequest(args: {

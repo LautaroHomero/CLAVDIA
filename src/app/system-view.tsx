@@ -5,6 +5,7 @@ import type { Actor, ProviderSettings } from "@/lib/domain/types";
 import { SPECIALTIES } from "@/lib/domain/specialties";
 import { MonthCalendar } from "./system-calendar";
 import { PatientsPanel } from "./system-patients";
+import { ProviderScheduleCard } from "./schedule-editor";
 import {
   BTN,
   BTN_DARK,
@@ -42,7 +43,14 @@ type SystemData =
   | {
       role: "staff";
       organization: { name: string; address: string; city: string; hours: string; phone: string } | null;
-      me: { userId: string; name: string; role: "medico" | "recepcion"; specialty: string | null; canAdmin: boolean };
+      me: {
+        userId: string;
+        name: string;
+        role: "medico" | "recepcion";
+        specialty: string | null;
+        providerId: string | null;
+        canAdmin: boolean;
+      };
       providers: { id: string; name: string; specialty: string; roomLabel: string; active: boolean }[];
       calendar: CalData;
       providerSettings: ProviderSettings | null;
@@ -371,6 +379,10 @@ function StaffSidePanel({
         </div>
       </aside>
 
+      {data.me.role === "medico" && data.me.providerId && (
+        <ProviderScheduleCard providerId={data.me.providerId} canEdit onDone={onDone} />
+      )}
+
       {data.me.role === "medico" && data.providerSettings && (
         <ChangePolicyCard settings={data.providerSettings} onDone={onDone} />
       )}
@@ -421,7 +433,7 @@ function ProfesionalesPanel({
       ) : (
         <div className="grid gap-2 sm:grid-cols-2">
           {data.providers.map((p) => (
-            <ProviderRow key={p.id} provider={p} onDone={onDone} />
+            <ProviderRow key={p.id} provider={p} canEditSchedule={data.me.canAdmin} onDone={onDone} />
           ))}
         </div>
       )}
@@ -531,13 +543,16 @@ function AdminsPanel({
 /** One team member row, with dar de baja / reactivar. */
 function ProviderRow({
   provider,
+  canEditSchedule,
   onDone,
 }: {
   provider: { id: string; name: string; specialty: string; roomLabel: string; active: boolean };
+  canEditSchedule: boolean;
   onDone: (msg: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [showSchedule, setShowSchedule] = useState(false);
 
   async function toggle() {
     const next = !provider.active;
@@ -575,15 +590,28 @@ function ProviderRow({
             {provider.specialty} · {provider.roomLabel}
           </p>
         </div>
-        <button
-          className="shrink-0 text-[11px] font-medium text-muted hover:text-ink disabled:opacity-50"
-          disabled={busy}
-          onClick={toggle}
-        >
-          {provider.active ? "Dar de baja" : "Reactivar"}
-        </button>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <button
+            className="text-[11px] font-medium text-muted hover:text-ink"
+            onClick={() => setShowSchedule((v) => !v)}
+          >
+            {showSchedule ? "Ocultar horario" : "Horario"}
+          </button>
+          <button
+            className="text-[11px] font-medium text-muted hover:text-ink disabled:opacity-50"
+            disabled={busy}
+            onClick={toggle}
+          >
+            {provider.active ? "Dar de baja" : "Reactivar"}
+          </button>
+        </div>
       </div>
       {error && <p className="mt-1 text-[11px] text-[#c0392b]">{error}</p>}
+      {showSchedule && (
+        <div className="mt-2">
+          <ProviderScheduleCard providerId={provider.id} canEdit={canEditSchedule} onDone={onDone} />
+        </div>
+      )}
     </div>
   );
 }

@@ -145,6 +145,7 @@ export async function GET(req: Request) {
       name: actor.name,
       role: actor.role,
       specialty: actor.activeOrg?.specialty ?? null,
+      providerId: actor.activeOrg?.providerId ?? null,
       canAdmin: Boolean(actor.activeOrg?.canAdmin),
     },
     providers: providers.map((p) => ({

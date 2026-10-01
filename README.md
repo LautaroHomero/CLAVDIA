@@ -11,7 +11,7 @@ Es **multi-consultorio**: cualquiera crea su organización con un wizard, y desd
 ahí carga profesionales y pacientes con **solo el DNI** si ya están en el sistema.
 Cada persona entra con **email o DNI + PIN**; el PIN nunca se reparte a mano — la
 persona lo elige la primera vez con **"Olvidé mi PIN"** (código de un solo uso al
-email o WhatsApp de su ficha). Según su rol —**profesional** (médico/a de cualquier
+email o por SMS al teléfono de su ficha). Según su rol —**profesional** (médico/a de cualquier
 especialidad, psicólogo/a…), **secretaría administrativa** o **paciente**— cambian
 sus instrucciones, sus herramientas y a qué datos puede acceder. La app tiene
 **dos vistas**: el chat con el agente y una **vista Sistema sin IA** (calendario
@@ -213,7 +213,7 @@ por DNI ignora puntos y espacios.
 persona lo elige la primera vez con **"Olvidé mi PIN"**:
 
 1. `POST /api/auth/pin-reset/request` — email o DNI → **código de 6 dígitos de un
-   solo uso** al email de la ficha (o WhatsApp si se pide y hay teléfono). El
+   solo uso** al email de la ficha (o por SMS si se pide y hay teléfono). El
    código se guarda **hasheado** (nunca en claro), vence en 10 min, y hay
    *cooldown* de 60 s para no spamear. La respuesta HTTP es **idéntica exista o no
    la cuenta** → no sirve para enumerar emails/DNIs registrados.
@@ -222,10 +222,12 @@ persona lo elige la primera vez con **"Olvidé mi PIN"**:
    que controla el canal). **Staff** → se le pide iniciar sesión (puede tener que
    elegir consultorio).
 
-El envío sale por [`src/lib/notify`](src/lib/notify) — transporte *pluggable*
-(`NOTIFY_TRANSPORT`): el default `log` imprime el código en la consola del server
-(alcanza para dev y un primer deploy); `resend` / `twilio` se enchufan sin tocar
-el resto del código.
+El envío sale por [`src/lib/notify`](src/lib/notify) — el proveedor se elige **por
+canal**, según qué credenciales estén seteadas (no un switch global): `email` va
+por Resend si hay `RESEND_API_KEY`, `sms` va por Twilio si hay
+`TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`/`TWILIO_FROM`; un canal sin credenciales
+cae a imprimir el código en la consola del server (alcanza para dev y un primer
+deploy). WhatsApp queda como tipo de canal para el futuro, todavía sin implementar.
 
 **Altas (todas siguen el mismo patrón DNI-first):**
 
@@ -503,11 +505,35 @@ Cada acción vuelve a chequear rol / consultorio / propiedad en el servidor.
   Primer campo: el **DNI**. Si la persona ya está en el sistema, con eso se la
   suma; si es nueva se piden nombre, email, teléfono y —si es profesional— el
   **tipo** de `SPECIALTIES` (con "Otra…"). **Sin campo de PIN**: entra con "Olvidé
-  mi PIN". Checklist de _Primeros pasos_ mientras no haya profesionales.
+  mi PIN". Cada profesional tiene un botón **"Horario"** que despliega el mismo
+  editor de horario de trabajo que el médico ve en "Mi perfil" (ver más abajo).
+  Checklist de _Primeros pasos_ mientras no haya profesionales.
 
-Panel derecho del staff: _Mi perfil_, _Consultorio_ (dirección + localidad,
-horarios, teléfono) y —solo para el médico— **_Cambios de turno (mi agenda)_**:
-dos políticas por profesional (`provider_settings`, `PATCH /api/providers/settings`):
+**Horario de trabajo** (`src/app/schedule-editor.tsx`, `ProviderScheduleCard`):
+el propio médico lo edita desde "Mi perfil"; secretaría/admin puede editar el
+de cualquier profesional de su organización desde "Profesionales"
+(`canEditProviderSchedule` en `src/lib/auth/actor.ts`). Dos niveles:
+
+- **Patrón semanal** (`provider_schedule_rules`): franjas por día de la semana
+  (ninguna franja = cerrado ese día), editable por completo —
+  `GET`/`PUT /api/providers/[id]/schedule`.
+- **Excepciones puntuales por fecha** (`provider_schedule_overrides`): le
+  ganan por completo al patrón semanal ese día (horario especial, o
+  `closed: true`) — `GET /api/providers/[id]/schedule/overrides`,
+  `PUT`/`DELETE /api/providers/[id]/schedule/overrides/[date]`.
+
+Guardar cualquiera de los dos regenera de inmediato los `slots` reservables
+del profesional (`regenerateProviderSlots` en `src/lib/db/repo.ts`): los
+turnos ya tomados nunca se tocan aunque queden fuera del horario nuevo — la
+respuesta informa cuántos quedaron en conflicto (`conflicts`) para avisar sin
+bloquear ni cancelar nada. Un cron diario (`GET /api/cron/regenerate-schedules`,
+ver §8) hace lo mismo para todos los profesionales activos, para que la
+ventana de agenda generada siga rodando hacia adelante.
+
+Panel derecho del staff: _Mi perfil_ (+ _Horario de trabajo_ si es médico),
+_Consultorio_ (dirección + localidad, horarios, teléfono) y —solo para el
+médico— **_Cambios de turno (mi agenda)_**: dos políticas por profesional
+(`provider_settings`, `PATCH /api/providers/settings`):
 
 | Ajuste | Opciones |
 | --- | --- |
@@ -547,15 +573,17 @@ consultar (o cargar) cualquiera de los tres directamente.
 | --- | --- |
 | `organizations` | los consultorios (inquilinos): nombre, `slug`, dirección, **localidad**, horarios, teléfono. |
 | `users` | login **global**: nombre, **email** + **dni** (ambos con índice único, cualquiera sirve para entrar), **phone**, rol, `pin_hash`/`pin_salt` (scrypt; `''` = todavía sin PIN), `patient_id`. |
-| `pin_reset_codes` | códigos de un solo uso para recuperar / activar el PIN: `code_hash`/`code_salt`, `channel` (`email`/`whatsapp`), `sent_to` (enmascarado), `attempts`, `expires_at`, `consumed_at`. |
+| `pin_reset_codes` | códigos de un solo uso para recuperar / activar el PIN: `code_hash`/`code_salt`, `channel` (`email`/`sms`), `sent_to` (enmascarado), `attempts`, `expires_at`, `consumed_at`. |
 | `memberships` | staff × organización: `role`, `provider_id` en ese consultorio y `can_admin`. Un profesional puede tener varias. |
 | `patient_organizations` | paciente × organización: en qué consultorios está asociado. |
 | `providers` | profesionales (por consultorio): nombre, especialidad, consultorio, `default_fee`. |
 | `provider_prices` | prácticas con nombre y precio, por profesional. |
 | `provider_settings` | política de **cambios manuales de turno** por profesional: `who_can_change` (`anyone`/`staff_only`), `late_change_policy` (`direct`/`needs_approval`). |
+| `provider_schedule_rules` | **patrón semanal** de horario de trabajo por profesional: `weekday` (0–6) + franja (`start_time`/`end_time`); editable por el propio profesional o por secretaría/admin. |
+| `provider_schedule_overrides` | **excepción puntual por fecha** que le gana por completo al patrón semanal ese día: franjas propias, o `closed=1` (no atiende). |
 | `patients`, `medications` | fichas y medicación — **globales** (una ficha por persona). |
-| `slots` | grilla de horarios (09–12, cada 30', próximos días hábiles), `taken`. |
-| `appointments` | turnos: `status` (`scheduled` / `in-progress` / `completed` / `cancelled`), `price`, `actual_start`/`actual_end`, `created_via`. |
+| `slots` | grilla de horarios reservables, generada a partir de `provider_schedule_rules`/`provider_schedule_overrides` (`regenerateProviderSlots`, próximos 30 días rodantes), `taken`. |
+| `appointments` | turnos: `status` (`scheduled` / `in-progress` / `completed` / `cancelled`), `price`, `actual_start`/`actual_end`, `created_via`, `reminder_sent_at` (marca cuándo se mandó el recordatorio; `NULL` = pendiente). |
 | `appointment_change_requests` | cambio de turno de un paciente con < 24 h que espera visto bueno del profesional: `kind` (`cancel`/`reschedule`), `new_slot_id`, `status` (`pending`/`approved`/`rejected`). |
 | `invoices`, `lab_results` | facturación y resultados. |
 | `prescription_requests`, `patient_messages` | pedidos de receta y mensajes enviados. |
@@ -609,10 +637,70 @@ migración nueva: un archivo `NNNN_algo.sql` en `src/lib/db/migrations/` y
 | `DATABASE_URL_DIRECT` | ✅ para migrar | **Session pooler** de Supabase (puerto 5432, no "Direct connection" — ver nota arriba) — solo la usa `npm run db:migrate`. |
 | `AUTH_SECRET` | ✅ en prod | Firma la cookie de sesión (HMAC). En dev cae a un default; **en producción es obligatoria** y debe medir ≥ 32 chars random o la app no arranca (`openssl rand -base64 48`). |
 | `AGENT_MODEL` | — | Id de modelo Anthropic. Default `claude-haiku-4-5-20251001` (barato para probar; se puede subir a `claude-sonnet-4-5`). |
-| `NOTIFY_TRANSPORT` | — | Canal de salida de los códigos de recuperación de PIN. Default `log` (los imprime en la consola del server — alcanza para dev y un primer deploy). `resend` / `twilio` se implementan en [`src/lib/notify`](src/lib/notify) y se activan acá (con `RESEND_API_KEY` / `TWILIO_*`). |
+| `RESEND_API_KEY` | — | API key de [resend.com](https://resend.com) (**API Keys**). Si está seteada, los mensajes de canal `email` (código de recuperación de PIN, confirmación/cancelación/recordatorio de turno) salen por Resend; si no, se imprimen en la consola del server (alcanza para dev y un primer deploy). Ver [`src/lib/notify`](src/lib/notify). |
+| `RESEND_FROM` | — | Remitente de los mails, ej. `Clavdia <turnos@tudominio.com>` — tiene que ser un dominio verificado en Resend. Default `Clavdia <onboarding@resend.dev>` (solo entrega de forma confiable a la cuenta dueña de Resend; no sirve para pacientes reales). |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | — | Credenciales de [twilio.com](https://twilio.com). Si las tres variables de Twilio están seteadas, los mensajes de canal `sms` (hoy, el código de recuperación de PIN por SMS) salen por Twilio; si no, se imprimen en la consola del server. |
+| `TWILIO_FROM` | — | Número de Twilio con capacidad SMS, en formato E.164 (ej. `+14155238886`). Es un recurso distinto de `TWILIO_WHATSAPP_FROM` (WhatsApp, todavía no implementado). |
+| `CRON_SECRET` | recomendada | Secreto compartido que valida al cron externo que llama `GET /api/cron/reminders` y `GET /api/cron/regenerate-schedules` (ver más abajo, mismo chequeo en `src/lib/auth/cron.ts`). Sin esto los endpoints quedan sin autenticación (se loguea un warning). |
 | `SLACK_BOT_TOKEN` | — | Bot token (`xoxb-…`). Sin esto, el human-in-the-loop usa solo el panel de la UI. |
 | `SLACK_SIGNING_SECRET` | — | Verifica la firma de los webhooks de Slack. |
 | `SLACK_APPROVAL_CHANNEL` | — | **ID** del canal de aprobaciones (ej. `C0123ABCDE`). |
+
+### Notificaciones por email y recordatorios de turno
+
+Con `RESEND_API_KEY` configurada, el paciente
+recibe un email en tres momentos — todos disparados desde
+[`src/lib/domain/scheduling.ts`](src/lib/domain/scheduling.ts) (booking/cancel)
+o el cron de abajo (recordatorio), nunca duplicados entre el agente y la vista
+Sistema porque ambos pasan por el mismo módulo:
+
+- **Confirmación** al agendar un turno.
+- **Aviso de cancelación** al cancelarlo.
+- **Recordatorio** 24 h antes (configurable en
+  [`src/app/api/cron/reminders/route.ts`](src/app/api/cron/reminders/route.ts),
+  constante `REMINDER_LEAD_HOURS`).
+
+Un mail que falla (paciente sin email en la ficha, Resend caído) nunca rompe
+el flujo de agendar/cancelar: se loguea y listo — ver
+[`src/lib/domain/appointment-notifications.ts`](src/lib/domain/appointment-notifications.ts).
+
+El recordatorio no tiene un cron propio corriendo adentro de la app (no hay
+`sleep()`/worker de fondo para esto todavía): hace falta un llamador externo
+que pegue periódicamente a `GET /api/cron/reminders`. El endpoint es
+idempotente — vuelve a barrer los turnos "scheduled" que arrancan dentro de
+las próximas 24 h y todavía no tienen `reminder_sent_at`, y marca la columna
+al mandarlos — así da igual la frecuencia con la que se lo llame, nunca manda
+el mismo recordatorio dos veces.
+
+**Si el deploy es en Vercel** (el repo ya trae [`vercel.json`](vercel.json)
+con un cron diario a las 12:00 UTC — el plan **Hobby** solo permite una
+corrida por día; con **Pro** se puede bajar a una expresión horaria como
+`0 * * * *` para que el recordatorio llegue más cerca de las 24 h exactas):
+seteá `CRON_SECRET` como variable de entorno del proyecto en Vercel y listo —
+Vercel manda automáticamente `Authorization: Bearer $CRON_SECRET` en cada
+corrida programada, no hace falta configurar nada más.
+
+**Si el deploy es en otro lado**, apuntá cualquier cron genérico (crontab del
+servidor, GitHub Actions con `schedule`, un servicio como cron-job.org) a la
+misma URL, por ejemplo:
+
+```bash
+# crontab -e — corre cada hora
+0 * * * * curl -fsS -H "Authorization: Bearer $CRON_SECRET" https://tu-dominio/api/cron/reminders
+```
+
+### Regenerar la agenda desde el horario configurado
+
+`GET /api/cron/regenerate-schedules` (mismo secreto, mismo estilo que el cron
+de arriba) recorre todos los profesionales activos y llama
+`regenerateProviderSlots` para cada uno: extiende la ventana de `slots`
+reservables un día más a partir de su patrón semanal + excepciones (ver
+"Horario de trabajo" en §6), sin tocar nunca los turnos ya tomados. Corre una
+vez por día — `vercel.json` ya trae `0 5 * * *` (antes del horario de
+apertura). Usa la fecha/hora real del sistema, no `DEMO_TODAY`
+([`src/lib/domain/clock.ts`](src/lib/domain/clock.ts)), que queda fijo desde
+que arrancó el proceso: si se llama solo a mano en dev, la ventana no "rueda"
+sola entre reinicios del server.
 
 ---
 
@@ -733,6 +821,7 @@ src/
 │   ├── system-calendar.tsx          cliente: calendario mensual + reserva/cancelación/reprogramación
 │   ├── system-patients.tsx          cliente: buscador de pacientes + edición de ficha + medicación
 │   ├── system-shared.tsx            cliente: CalRow (acciones por turno), PatientPicker, SlotPicker, helpers
+│   ├── schedule-editor.tsx          cliente: ProviderScheduleCard — patrón semanal + excepciones por fecha
 │   ├── login/page.tsx               (email|DNI)+PIN, picker de consultorio, "Olvidé mi PIN", alta de paciente, wizard de consultorio
 │   ├── globals.css                  tokens de diseño (Tailwind v4 @theme)
 │   └── api/
@@ -748,12 +837,17 @@ src/
 │       ├── appointment-changes/route.ts     GET pendientes · POST aprobar/rechazar un cambio de turno
 │       ├── slots/route.ts           huecos libres para los pickers de reserva/reprogramación
 │       ├── providers/settings/route.ts      GET/PATCH la política de cambios del profesional
+│       ├── providers/[id]/schedule/route.ts             GET/PUT patrón semanal de horario
+│       ├── providers/[id]/schedule/overrides/route.ts   GET excepciones puntuales en un rango
+│       ├── providers/[id]/schedule/overrides/[date]/route.ts   PUT/DELETE excepción de una fecha
 │       ├── patients/route.ts        alta de paciente (staff DNI-first + ensurePatientLogin; o autogestión con verificación email+tel)
 │       ├── patients/search/route.ts         lista/búsqueda de pacientes del consultorio (staff)
 │       ├── patients/[id]/route.ts            GET/PATCH la ficha (scope por rol/consultorio)
 │       ├── patients/[id]/medications/[...]   POST/DELETE medicación de la ficha
 │       ├── organizations/route.ts   GET lista pública · POST wizard self-serve (org + usuario fundador)
 │       ├── professionals/route.ts   POST alta de profesional o secretaría (DNI-first, sin PIN; solo canAdmin)
+│       ├── cron/reminders/route.ts  GET: recordatorio de turno por email — llamado por un cron externo, no por la UI
+│       ├── cron/regenerate-schedules/route.ts   GET: rueda la ventana de slots según el horario configurado — ídem
 │       └── auth/
 │           ├── {login,logout,me,switch-org}/route.ts   login por email|DNI, sesión
 │           └── pin-reset/{request,confirm}/route.ts     código de un solo uso → PIN nuevo
@@ -771,14 +865,15 @@ src/
     ├── db/
     │   ├── connection.ts             singleton postgres.js (pooled, prepare:false)
     │   ├── migrate.ts migrations/*.sql   runner de migraciones versionadas
-    │   ├── slots.ts                  genera la grilla de horarios de un profesional nuevo
+    │   ├── slots.ts                  funciones puras: horario configurado (patrón + excepciones) → slots deseados
     │   └── repo.ts                  todas las queries tipadas y async (scope por organización)
     ├── domain/
     │   ├── {types.ts,briefing.ts,clock.ts,specialties.ts}
     │   ├── scheduling.ts            reservar / cancelar / reprogramar + refresco de avisos (agente + REST)
+    │   ├── appointment-notifications.ts   emails de confirmación/cancelación/recordatorio (llamado desde scheduling.ts y el cron)
     │   └── appointment-view.ts      manageFlags (qué puede hacer el actor a mano) + vista de pedidos de cambio
     ├── approvals/{types.ts,registry.ts}   la fila pending_requests
-    ├── notify/index.ts                    envío de códigos (transporte pluggable: log · resend · twilio)
+    ├── notify/index.ts                    envío de emails y SMS (proveedor por canal: log · resend (email) · twilio (sms); WhatsApp pendiente)
     └── slack/{client.ts,blocks.ts}        Block Kit + verificación de firma
 ```
 
@@ -818,9 +913,18 @@ src/
 - **Identidad anclada en el DNI, PINs que nadie reparte.** El alta de una persona
   ya conocida es solo el DNI (sin re-tipear datos ni crear duplicados); el PIN lo
   elige la propia persona con "Olvidé mi PIN" (código de un solo uso al canal que
-  ya está en su ficha). Un staff nunca conoce ni dicta el PIN de otro. El envío es
-  un módulo aparte (`src/lib/notify`) con transporte pluggable — cambiar de la
-  consola a Resend/Twilio no toca el resto del código.
+  ya está en su ficha — email o SMS, a elección de la persona). Un staff nunca
+  conoce ni dicta el PIN de otro. El envío es un módulo aparte (`src/lib/notify`)
+  que elige proveedor por canal — email por Resend, SMS por Twilio, cada uno
+  independiente y con fallback a consola si no tiene credenciales — sin tocar el
+  resto del código.
+- **Confirmación/cancelación/recordatorio de turno son un efecto de
+  `scheduling.ts`, no una tool del agente.** Enviar el email es determinístico
+  y tiene que pasar siempre que se agenda/cancela, la haga el chat o la vista
+  Sistema — así que vive junto a la única implementación de esas mutaciones
+  (`src/lib/domain/appointment-notifications.ts`), no repartido en `tools.ts`
+  y en cada endpoint REST. El recordatorio corre aparte, en un cron
+  (`GET /api/cron/reminders`) idempotente por `reminder_sent_at`.
 - **Reloj simulado por profesional.** No hay "now" real durante una consulta en el
   demo; el reloj lo mueve el profesional al marcar inicio/fin. En producción, un
   workflow durable con `sleep()` haría el cierre del día y detectaría demoras.
@@ -832,7 +936,8 @@ src/
 | Postgres (Supabase) ya en dev/test; prod en el tier free | Upgradear el proyecto de prod antes del launch (los free se pausan por inactividad) |
 | Web corriendo local (`npm run dev`) | Elegir hosting (Vercel u otro) y wirear `DATABASE_URL`/`DATABASE_URL_DIRECT` por entorno |
 | Login (email\|DNI) + PIN + cookie HMAC (`AUTH_SECRET` fuerte y cookie `Secure` en prod) | OAuth/SSO, rotación, MFA, rate-limiting por IP |
-| Recuperación de PIN por código de 6 dígitos; transporte `log` (consola) por default | Provider real (Resend / Twilio WhatsApp) vía `NOTIFY_TRANSPORT`; rate-limit y captcha en `request` |
+| Recuperación de PIN por email o SMS (Resend/Twilio), confirmación/cancelación/recordatorio de turno por email; cae a consola sin credenciales | WhatsApp como canal adicional; rate-limit y captcha en `pin-reset/request` |
+| Recordatorio de turno disparado por un cron externo (`GET /api/cron/reminders`, sin worker propio) | Cron nativo del hosting (ej. Vercel Cron, ya en `vercel.json`) o un scheduler dedicado con reintentos y alerta si falla |
 | Reclamo de ficha existente verificando que email + teléfono coincidan con la ficha | Verificación real del canal (link / OTP), no "coincide con lo cargado" |
 | "Hoy" y la agenda se anclan a la hora del arranque; el reloj lo mueve el profesional | Reloj real + workflow `sleep()` para el cierre del día y la detección automática de demoras |
 | Contabilidad de tokens a `console.info` | Métrica agregada por consultorio → billing / límites |
