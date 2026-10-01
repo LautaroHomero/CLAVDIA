@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { BTN, BTN_DARK, FIELD, fmtDateTime } from "./system-shared";
+import { BTN, BTN_DARK, FIELD, fmtDateTime, localToday, NewPatientForm } from "./system-shared";
 
 interface MedRow {
   id: string;
@@ -35,6 +35,7 @@ interface Hit {
 export function PatientsPanel({ onDone }: { onDone: (msg: string) => void }) {
   const [view, setView] = useState<"browse" | "new">("browse");
   const [openId, setOpenId] = useState<string | null>(null);
+  const [freshDni, setFreshDni] = useState<string | null>(null);
 
   return (
     <div className="space-y-3">
@@ -49,10 +50,11 @@ export function PatientsPanel({ onDone }: { onDone: (msg: string) => void }) {
           {view === "new" ? (
             <NewPatientForm
               onCancel={() => setView("browse")}
-              onDone={(msg, id) => {
-                onDone(msg);
+              onDone={(r) => {
+                onDone(r.message);
                 setView("browse");
-                setOpenId(id);
+                setOpenId(r.patientId);
+                setFreshDni(r.alreadyExisted ? null : r.dni);
               }}
             />
           ) : (
@@ -64,7 +66,11 @@ export function PatientsPanel({ onDone }: { onDone: (msg: string) => void }) {
       {openId && (
         <FichaEditor
           patientId={openId}
-          onBack={() => setOpenId(null)}
+          freshlyCreatedDni={freshDni}
+          onBack={() => {
+            setOpenId(null);
+            setFreshDni(null);
+          }}
           onDone={onDone}
         />
       )}
@@ -152,88 +158,22 @@ function BrowsePatients({ onOpen }: { onOpen: (id: string) => void }) {
 
 const LABEL = "text-[12px] font-semibold text-ink";
 
-function NewPatientForm({
-  onCancel,
-  onDone,
-}: {
-  onCancel: () => void;
-  onDone: (msg: string, id: string) => void;
-}) {
-  const [f, setF] = useState({ fullName: "", dni: "", dateOfBirth: "", coverage: "", phone: "", email: "" });
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value });
-
-  async function submit() {
-    setBusy(true);
-    setError("");
-    try {
-      const r = await fetch("/api/patients", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(f),
-      });
-      const d = await r.json();
-      if (!r.ok || !d.ok) {
-        setError(d.error ?? "No se pudo crear.");
-        return;
-      }
-      onDone(d.message ?? "Paciente dado de alta.", d.patientId);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="space-y-2 rounded-lg border border-hairline p-3">
-      <input value={f.dni} onChange={set("dni")} placeholder="DNI" className={FIELD} />
-      <p className="text-[11px] text-muted">
-        Si el paciente ya está en el sistema, con el DNI alcanza: se lo suma a este consultorio. Si es
-        nuevo/a, completá también nombre, nacimiento, cobertura, email y teléfono (email y teléfono le
-        sirven para recuperar el PIN y entrar).
-      </p>
-      <input value={f.fullName} onChange={set("fullName")} placeholder="Nombre y apellido" className={FIELD} />
-      <input
-        value={f.dateOfBirth}
-        onChange={set("dateOfBirth")}
-        placeholder="Fecha de nacimiento (AAAA-MM-DD)"
-        className={FIELD}
-      />
-      <input value={f.coverage} onChange={set("coverage")} placeholder="Cobertura (obra social / prepaga)" className={FIELD} />
-      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono" className={FIELD} />
-      <input value={f.email} onChange={set("email")} placeholder="Email" className={FIELD} />
-      <div className="flex gap-2">
-        <button
-          className={BTN_DARK}
-          disabled={
-            busy ||
-            f.dni.replace(/\D/g, "").length < 7
-          }
-          onClick={submit}
-        >
-          Dar de alta
-        </button>
-        <button className={BTN} onClick={onCancel}>
-          Cancelar
-        </button>
-      </div>
-      {error && <p className="text-[12px] text-[#c0392b]">{error}</p>}
-    </div>
-  );
-}
-
 function FichaEditor({
   patientId,
+  freshlyCreatedDni,
   onBack,
   onDone,
 }: {
   patientId: string;
+  /** DNI of a ficha we just created, so we can offer to send the access instructions. */
+  freshlyCreatedDni?: string | null;
   onBack: () => void;
   onDone: (msg: string) => void;
 }) {
   const [ficha, setFicha] = useState<Ficha | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [initialDni, setInitialDni] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -243,8 +183,12 @@ function FichaEditor({
       try {
         const d = await fetch(`/api/patients/${patientId}`, { cache: "no-store" }).then((r) => r.json());
         if (!alive) return;
-        if (d.ok) setFicha(d.patient);
-        else setError(d.error ?? "No se pudo cargar la ficha.");
+        if (d.ok) {
+          setFicha(d.patient);
+          setInitialDni(d.patient.dni);
+        } else {
+          setError(d.error ?? "No se pudo cargar la ficha.");
+        }
       } catch {
         if (alive) setError("No se pudo cargar la ficha.");
       }
@@ -261,6 +205,15 @@ function FichaEditor({
 
   async function save() {
     if (!ficha) return;
+    // The DNI is the identity a person logs in with, in every consultorio they
+    // attend — changing it here is a bigger deal than editing a note, so it
+    // gets its own confirmation instead of riding along with "Guardar cambios".
+    if (initialDni !== null && ficha.dni.trim() !== initialDni.trim()) {
+      const confirmed = window.confirm(
+        `Vas a cambiar el DNI de ${ficha.fullName}. Es el dato con el que esta persona inicia sesión en todos sus consultorios. ¿Confirmás el cambio?`,
+      );
+      if (!confirmed) return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -285,6 +238,7 @@ function FichaEditor({
         return;
       }
       setFicha(d.patient);
+      setInitialDni(d.patient.dni);
       onDone("Ficha guardada.");
     } finally {
       setBusy(false);
@@ -308,6 +262,8 @@ function FichaEditor({
         ← volver a pacientes
       </button>
 
+      {freshlyCreatedDni && ficha?.dni === freshlyCreatedDni && <AccessInstructionsPrompt dni={freshlyCreatedDni} />}
+
       {error && <p className="text-[12px] text-[#c0392b]">{error}</p>}
       {!ficha ? (
         <p className="text-[13px] text-muted">Cargando ficha…</p>
@@ -316,7 +272,13 @@ function FichaEditor({
           <div className="grid gap-2 sm:grid-cols-2">
             <Field label="Nombre y apellido" value={ficha.fullName} onChange={(v) => upd("fullName", v)} />
             <Field label="DNI" value={ficha.dni} onChange={(v) => upd("dni", v)} />
-            <Field label="Fecha de nacimiento" value={ficha.dateOfBirth} onChange={(v) => upd("dateOfBirth", v)} type="date" />
+            <Field
+              label="Fecha de nacimiento"
+              value={ficha.dateOfBirth}
+              onChange={(v) => upd("dateOfBirth", v)}
+              type="date"
+              max={localToday()}
+            />
             <Field label="Cobertura" value={ficha.coverage} onChange={(v) => upd("coverage", v)} />
             <Field label="Teléfono" value={ficha.phone} onChange={(v) => upd("phone", v)} />
             <Field label="Email" value={ficha.email} onChange={(v) => upd("email", v)} />
@@ -379,21 +341,64 @@ function FichaEditor({
   );
 }
 
+/**
+ * Shown once, right after an alta, on the ficha we just created. Sends the
+ * same "Olvidé mi PIN" flow the person would trigger themselves, so the
+ * staff doesn't have to explain how to log in by word of mouth.
+ */
+function AccessInstructionsPrompt({ dni }: { dni: string }) {
+  const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [msg, setMsg] = useState("");
+
+  async function send() {
+    setStatus("sending");
+    try {
+      const r = await fetch("/api/auth/pin-reset/request", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ dni }),
+      });
+      const d = await r.json();
+      setMsg(d.message ?? (d.ok ? "Instructivo enviado." : d.error ?? "No se pudo enviar."));
+      setStatus(d.ok ? "sent" : "error");
+    } catch {
+      setMsg("No se pudo enviar.");
+      setStatus("error");
+    }
+  }
+
+  if (status === "sent") {
+    return <p className="rounded-md border border-hairline bg-canvas px-3 py-2 text-[12px] text-ink">{msg}</p>;
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-hairline bg-canvas px-3 py-2">
+      <span className="text-[12px] text-ink">Ficha creada. ¿Le avisamos ahora cómo entrar?</span>
+      <button className={BTN} disabled={status === "sending"} onClick={send}>
+        {status === "sending" ? "Enviando…" : "Enviar instructivo de acceso ahora"}
+      </button>
+      {status === "error" && <span className="text-[12px] text-[#c0392b]">{msg}</span>}
+    </div>
+  );
+}
+
 function Field({
   label,
   value,
   onChange,
   type,
+  max,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   type?: string;
+  max?: string;
 }) {
   return (
     <label className="space-y-1">
       <span className={LABEL}>{label}</span>
-      <input type={type ?? "text"} value={value} onChange={(e) => onChange(e.target.value)} className={FIELD} />
+      <input type={type ?? "text"} value={value} onChange={(e) => onChange(e.target.value)} max={max} className={FIELD} />
     </label>
   );
 }

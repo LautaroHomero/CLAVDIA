@@ -1,20 +1,21 @@
 import {
   createPatient,
   createUser,
-  ensurePatientLogin,
   getOrganization,
   getPatientByDni,
   getUserByPatientId,
   joinPatientOrg,
   normEmail,
   normPhone,
-  patientInOrg,
   userEmailTaken,
 } from "@/lib/db/repo";
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-/** At least 8 digits once separators/prefixes are stripped. */
-const phoneOk = (s: string) => s.replace(/\D/g, "").length >= 8;
+import {
+  DNI_INVALID_ERROR,
+  dniLooksValid,
+  emailLooksValid,
+  phoneLooksValid,
+  resolveOrCreatePatient,
+} from "@/lib/domain/patients";
 import { hashPin } from "@/lib/auth/pin";
 import { actorFromRequest, hydrateActor } from "@/lib/auth/actor";
 import { sessionSetCookie, signSession } from "@/lib/auth/session";
@@ -61,10 +62,13 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  if (!EMAIL_RE.test(email)) {
+  if (!dniLooksValid(dni)) {
+    return Response.json({ ok: false, error: DNI_INVALID_ERROR }, { status: 400 });
+  }
+  if (!emailLooksValid(email)) {
     return Response.json({ ok: false, error: "El email no parece válido." }, { status: 400 });
   }
-  if (!phoneOk(phone)) {
+  if (!phoneLooksValid(phone)) {
     return Response.json({ ok: false, error: "El teléfono no parece válido." }, { status: 400 });
   }
   if (await userEmailTaken(email)) {
@@ -143,63 +147,32 @@ async function staffCreateOrJoin(req: Request, actor: Actor) {
     email?: string;
     notes?: string;
   };
-  const dni = body.dni?.trim();
-  if (!dni) {
-    return Response.json({ ok: false, error: "Indicá el DNI." }, { status: 400 });
-  }
 
-  // Already in the system → just link to this org (DNI is enough, no re-entry).
-  const existing = await getPatientByDni(dni);
-  if (existing) {
-    const alreadyHere = await patientInOrg(existing.id, orgId);
-    if (!alreadyHere) await joinPatientOrg(existing.id, orgId);
-    await ensurePatientLogin({
-      patientId: existing.id,
-      name: existing.fullName,
-      email: existing.email,
-      dni: existing.dni,
-      phone: existing.phone,
-    });
-    return Response.json({
-      ok: true,
-      patientId: existing.id,
-      alreadyExisted: true,
-      message: alreadyHere
-        ? `${existing.fullName} (DNI ${existing.dni}) ya era paciente de ${orgName}.`
-        : `${existing.fullName} (DNI ${existing.dni}) ya estaba en el sistema; lo/la sumamos a ${orgName}.`,
-    });
-  }
+  const result = await resolveOrCreatePatient(
+    {
+      dni: body.dni ?? "",
+      fullName: body.fullName,
+      dateOfBirth: body.dateOfBirth,
+      coverage: body.coverage,
+      phone: body.phone,
+      email: body.email,
+      notes: body.notes,
+    },
+    orgId,
+  );
+  if (!result.ok) return Response.json({ ok: false, error: result.error }, { status: result.status });
 
-  // New person → full data required (email + phone are the recovery anchors).
-  const fullName = body.fullName?.trim();
-  const dateOfBirth = body.dateOfBirth?.trim();
-  const coverage = body.coverage?.trim();
-  const email = body.email?.trim().toLowerCase();
-  const phone = body.phone?.trim();
-  if (!fullName || !dateOfBirth || !coverage || !email || !phone) {
-    return Response.json(
-      {
-        ok: false,
-        error: "Paciente nuevo: completá nombre, fecha de nacimiento (AAAA-MM-DD), cobertura, email y teléfono.",
-      },
-      { status: 400 },
-    );
-  }
-  if (!EMAIL_RE.test(email)) {
-    return Response.json({ ok: false, error: "El email no parece válido." }, { status: 400 });
-  }
-  if (!phoneOk(phone)) {
-    return Response.json({ ok: false, error: "El teléfono no parece válido." }, { status: 400 });
-  }
-
-  const patient = await createPatient({ fullName, dni, dateOfBirth, coverage, phone, email, notes: body.notes });
-  await joinPatientOrg(patient.id, orgId);
-  await ensurePatientLogin({ patientId: patient.id, name: fullName, email, dni, phone });
+  const { patient, alreadyExisted, alreadyInOrg } = result;
   return Response.json({
     ok: true,
     patientId: patient.id,
-    alreadyExisted: false,
+    alreadyExisted,
     fullName: patient.fullName,
-    message: `Ficha creada en ${orgName}. Puede entrar con su DNI o email y "Olvidé mi PIN" para elegir su PIN.`,
+    dni: patient.dni,
+    message: alreadyExisted
+      ? alreadyInOrg
+        ? `${patient.fullName} (DNI ${patient.dni}) ya era paciente de ${orgName}.`
+        : `${patient.fullName} (DNI ${patient.dni}) ya estaba en el sistema; lo/la sumamos a ${orgName}.`
+      : `Ficha creada en ${orgName}. Puede entrar con su DNI o email y "Olvidé mi PIN" para elegir su PIN.`,
   });
 }

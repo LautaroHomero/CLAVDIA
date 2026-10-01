@@ -330,6 +330,11 @@ export function PatientPicker({
 }) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<PatientHit[]>([]);
+  // The query a search actually completed for — lets us tell "still typing /
+  // debouncing" apart from "searched this and got nothing", without setting
+  // state synchronously inside the effect body.
+  const [searchedQuery, setSearchedQuery] = useState<string | null>(null);
+  const [addingNew, setAddingNew] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -337,11 +342,16 @@ export function PatientPicker({
     const t = setTimeout(() => {
       if (q.length < 2) {
         setHits([]);
+        setSearchedQuery(null);
         return;
       }
       fetch(`/api/patients/search?q=${encodeURIComponent(q)}`, { cache: "no-store" })
         .then((r) => r.json())
-        .then((d) => alive && setHits(d.matches ?? []))
+        .then((d) => {
+          if (!alive) return;
+          setHits(d.matches ?? []);
+          setSearchedQuery(q);
+        })
         .catch(() => {});
     }, 200);
     return () => {
@@ -362,6 +372,27 @@ export function PatientPicker({
       </div>
     );
   }
+
+  const q = query.trim();
+
+  if (addingNew) {
+    const looksLikeDni = /^\d[\d.\s]*$/.test(q);
+    return (
+      <NewPatientForm
+        initialDni={looksLikeDni ? q : ""}
+        initialName={!looksLikeDni ? q : ""}
+        onCancel={() => setAddingNew(false)}
+        onDone={(r) => {
+          onSelect({ patientId: r.patientId, fullName: r.fullName, dni: r.dni, coverage: r.coverage });
+          setAddingNew(false);
+          setQuery("");
+          setHits([]);
+        }}
+      />
+    );
+  }
+
+  const noMatches = q.length >= 2 && searchedQuery === q && hits.length === 0;
 
   return (
     <div className="space-y-1.5">
@@ -385,6 +416,205 @@ export function PatientPicker({
           {h.fullName} · DNI {h.dni} · {h.coverage}
         </button>
       ))}
+      {noMatches && (
+        <div className="rounded-md border border-dashed border-hairline px-2.5 py-2 text-[12px] text-muted">
+          Nadie coincide con &ldquo;{q}&rdquo;.{" "}
+          <button
+            className="font-semibold text-ink underline underline-offset-2 hover:opacity-80"
+            onClick={() => setAddingNew(true)}
+          >
+            Dar de alta a esta persona
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// New-patient form — DNI-first: a lone DNI is enough for someone already in
+// the system, a full ficha is only asked for once we know the DNI is new.
+// Shared by the Pacientes tab ("+ Nuevo paciente") and the PatientPicker
+// above (alta inline from the "Nuevo turno" search, so a walk-in booking
+// never needs to leave the modal).
+// ---------------------------------------------------------------------------
+
+const NEW_PATIENT_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const newPatientPhoneOk = (s: string) => s.replace(/\D/g, "").length >= 8;
+const newPatientDniOk = (s: string) => /^\d{7,8}$/.test(s.replace(/[.\s]/g, ""));
+
+export interface NewPatientResult {
+  patientId: string;
+  fullName: string;
+  dni: string;
+  coverage: string;
+  message: string;
+  alreadyExisted: boolean;
+}
+
+export function NewPatientForm({
+  initialDni = "",
+  initialName = "",
+  onCancel,
+  onDone,
+}: {
+  initialDni?: string;
+  initialName?: string;
+  onCancel: () => void;
+  onDone: (result: NewPatientResult) => void;
+}) {
+  const [step, setStep] = useState<"dni" | "existing" | "new">("dni");
+  const [dni, setDni] = useState(initialDni);
+  const [found, setFound] = useState<{ patientId: string; fullName: string; dni: string; coverage: string } | null>(
+    null,
+  );
+  const [f, setF] = useState({ fullName: initialName, dateOfBirth: "", coverage: "", phone: "", email: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value });
+
+  async function checkDni() {
+    if (!newPatientDniOk(dni)) {
+      setError("El DNI no parece válido. Revisá que tenga 7 u 8 dígitos.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const d = await fetch(`/api/patients/by-dni?dni=${encodeURIComponent(dni.trim())}`, {
+        cache: "no-store",
+      }).then((r) => r.json());
+      if (d.error) {
+        setError(d.error);
+        return;
+      }
+      if (d.exists) {
+        setFound(d.patient);
+        setStep("existing");
+      } else {
+        setStep("new");
+      }
+    } catch {
+      setError("No se pudo verificar el DNI.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submit(body: Record<string, unknown>, alreadyExisted: boolean) {
+    setBusy(true);
+    setError("");
+    try {
+      const r = await fetch("/api/patients", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        setError(d.error ?? "No se pudo guardar.");
+        return;
+      }
+      onDone({
+        patientId: d.patientId,
+        fullName: d.fullName ?? found?.fullName ?? f.fullName,
+        dni: d.dni ?? dni.trim(),
+        coverage: found?.coverage ?? f.coverage,
+        message: d.message ?? "Listo.",
+        alreadyExisted: d.alreadyExisted ?? alreadyExisted,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const newValid =
+    f.fullName.trim().length > 0 &&
+    f.dateOfBirth.trim().length > 0 &&
+    f.coverage.trim().length > 0 &&
+    NEW_PATIENT_EMAIL_RE.test(f.email.trim()) &&
+    newPatientPhoneOk(f.phone);
+
+  if (step === "dni") {
+    return (
+      <div className="space-y-2 rounded-lg border border-hairline p-3">
+        <input
+          autoFocus
+          value={dni}
+          onChange={(e) => setDni(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && checkDni()}
+          placeholder="DNI"
+          className={FIELD}
+        />
+        <p className="text-[11px] text-muted">
+          Si la persona ya está en el sistema, con el DNI alcanza para sumarla a este consultorio. Si es
+          nueva, en el siguiente paso pedimos el resto de la ficha.
+        </p>
+        <div className="flex gap-2">
+          <button className={BTN_DARK} disabled={busy || !dni.trim()} onClick={checkDni}>
+            Continuar
+          </button>
+          <button className={BTN} onClick={onCancel}>
+            Cancelar
+          </button>
+        </div>
+        {error && <p className="text-[12px] text-[#c0392b]">{error}</p>}
+      </div>
+    );
+  }
+
+  if (step === "existing" && found) {
+    return (
+      <div className="space-y-2 rounded-lg border border-hairline p-3">
+        <p className="text-[13px] text-ink">
+          Ya está en el sistema: <span className="font-semibold">{found.fullName}</span>
+        </p>
+        <p className="text-[12px] text-muted">
+          DNI {found.dni} · {found.coverage}
+        </p>
+        <div className="flex gap-2">
+          <button className={BTN_DARK} disabled={busy} onClick={() => submit({ dni: found.dni }, true)}>
+            Sumar a este consultorio
+          </button>
+          <button
+            className={BTN}
+            disabled={busy}
+            onClick={() => {
+              setStep("dni");
+              setFound(null);
+            }}
+          >
+            Volver
+          </button>
+        </div>
+        {error && <p className="text-[12px] text-[#c0392b]">{error}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2 rounded-lg border border-hairline p-3">
+      <p className="text-[11px] text-muted">DNI {dni.trim()} — persona nueva. Completá la ficha:</p>
+      <input value={f.fullName} onChange={set("fullName")} placeholder="Nombre y apellido" className={FIELD} />
+      <input
+        type="date"
+        value={f.dateOfBirth}
+        onChange={set("dateOfBirth")}
+        max={localToday()}
+        className={FIELD}
+      />
+      <input value={f.coverage} onChange={set("coverage")} placeholder="Cobertura (obra social / prepaga)" className={FIELD} />
+      <input value={f.phone} onChange={set("phone")} placeholder="Teléfono" className={FIELD} />
+      <input value={f.email} onChange={set("email")} placeholder="Email" className={FIELD} />
+      <div className="flex gap-2">
+        <button className={BTN_DARK} disabled={busy || !newValid} onClick={() => submit({ dni: dni.trim(), ...f }, false)}>
+          Dar de alta
+        </button>
+        <button className={BTN} disabled={busy} onClick={() => setStep("dni")}>
+          Volver
+        </button>
+      </div>
+      {error && <p className="text-[12px] text-[#c0392b]">{error}</p>}
     </div>
   );
 }

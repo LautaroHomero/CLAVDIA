@@ -62,8 +62,8 @@ export async function POST(req: Request) {
 
   const patient = user.patientId ? await getPatient(user.patientId) : undefined;
   const phone = user.phone?.trim() || patient?.phone?.trim();
-  const useChannel: NotifyChannel = channel === "whatsapp" && phone ? "whatsapp" : "email";
-  const to = useChannel === "whatsapp" ? phone : user.email;
+  const useChannel: NotifyChannel = channel === "sms" && phone ? "sms" : "email";
+  const to = useChannel === "sms" ? phone : user.email;
   if (!to) {
     trace("el paciente no tiene email ni teléfono en la ficha");
     return Response.json(GENERIC);
@@ -76,7 +76,7 @@ export async function POST(req: Request) {
     codeHash: hash,
     codeSalt: salt,
     channel: useChannel,
-    sentTo: useChannel === "whatsapp" ? maskPhone(to) : maskEmail(to),
+    sentTo: useChannel === "sms" ? maskPhone(to) : maskEmail(to),
     ttlMinutes: CODE_TTL_MIN,
   });
 

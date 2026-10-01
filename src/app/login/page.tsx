@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { SPECIALTIES } from "@/lib/domain/specialties";
+import { localToday } from "@/app/system-shared";
 
 type Screen = "login" | "signup" | "new-org" | "reset";
 type OrgOpt = { id: string; name: string; address?: string; city?: string };
@@ -181,12 +182,13 @@ function EmailLogin({ onDone }: { onDone: () => void }) {
 }
 
 // ---------------------------------------------------------------------------
-// PIN recovery — one-time code by email / WhatsApp, then a new PIN
+// PIN recovery — one-time code by email / SMS, then a new PIN
 // ---------------------------------------------------------------------------
 
 function PinReset({ onDone }: { onDone: () => void }) {
   const [phase, setPhase] = useState<"request" | "confirm">("request");
   const [ident, setIdent] = useState("");
+  const [channel, setChannel] = useState<"email" | "sms">("email");
   const [code, setCode] = useState("");
   const [newPin, setNewPin] = useState("");
   const [msg, setMsg] = useState("");
@@ -203,7 +205,7 @@ function PinReset({ onDone }: { onDone: () => void }) {
       const r = await fetch("/api/auth/pin-reset/request", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(identBody()),
+        body: JSON.stringify({ ...identBody(), channel }),
       });
       const d = await r.json();
       if (!r.ok || !d.ok) return setError(d.error ?? "No se pudo enviar el código.");
@@ -244,9 +246,29 @@ function PinReset({ onDone }: { onDone: () => void }) {
       {phase === "request" ? (
         <>
           <p className="text-[13px] text-muted">
-            Ingresá tu email o DNI. Te mandamos un código de un solo uso al email (o WhatsApp) que
+            Ingresá tu email o DNI. Te mandamos un código de un solo uso por email o SMS al que
             figura en tu ficha.
           </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setChannel("email")}
+              className={`flex-1 rounded-md border px-3.5 py-2 text-[14px] font-semibold transition-colors ${
+                channel === "email" ? "border-ink bg-ink text-white" : "border-hairline text-ink hover:border-ink"
+              }`}
+            >
+              Email
+            </button>
+            <button
+              type="button"
+              onClick={() => setChannel("sms")}
+              className={`flex-1 rounded-md border px-3.5 py-2 text-[14px] font-semibold transition-colors ${
+                channel === "sms" ? "border-ink bg-ink text-white" : "border-hairline text-ink hover:border-ink"
+              }`}
+            >
+              SMS
+            </button>
+          </div>
           <input
             autoFocus
             value={ident}
@@ -344,7 +366,7 @@ function PacienteSignup({ orgs, onDone }: { orgs: OrgOpt[]; onDone: () => void }
       </p>
       <input value={f.fullName} onChange={set("fullName")} placeholder="Nombre y apellido" className={FIELD} />
       <input value={f.dni} onChange={set("dni")} placeholder="DNI" className={FIELD} />
-      <input value={f.dateOfBirth} onChange={set("dateOfBirth")} placeholder="Fecha de nacimiento (AAAA-MM-DD)" className={FIELD} />
+      <input type="date" value={f.dateOfBirth} onChange={set("dateOfBirth")} max={localToday()} className={FIELD} />
       <input value={f.coverage} onChange={set("coverage")} placeholder="Cobertura (obra social / prepaga)" className={FIELD} />
       <input type="email" value={f.email} onChange={set("email")} placeholder="Email (para ingresar)" className={FIELD} />
       <input value={f.phone} onChange={set("phone")} placeholder="Teléfono" className={FIELD} />

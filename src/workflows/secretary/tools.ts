@@ -5,8 +5,6 @@ import {
   buildDayReport,
   addMembership,
   cancelAppointmentById,
-  createPatient,
-  ensurePatientLogin,
   createPrescriptionRequest,
   createProfessional,
   createUser,
@@ -18,7 +16,6 @@ import {
   getLabResultsForPatient,
   getOrganization,
   getPatient,
-  getPatientByDni,
   getProvider,
   getSavedDailyReport,
   getUserByDni,
@@ -56,6 +53,7 @@ import {
   refreshWaitingNotices,
   rescheduleAppointment as rescheduleAppointmentSvc,
 } from "@/lib/domain/scheduling";
+import { resolveOrCreatePatient } from "@/lib/domain/patients";
 import { postText as postSlackText } from "@/lib/slack/client";
 import { DEMO_TODAY, DEMO_TOMORROW } from "@/lib/domain/clock";
 import type { Actor, OrgRef, Role } from "@/lib/domain/types";
@@ -213,56 +211,23 @@ async function registerPatientStep(
   const orgId = staffOrgId(ctx);
   if (!orgId) return { ok: false, error: "Sin organización activa." };
   const orgName = actorOf(ctx)?.activeOrg?.name ?? "este consultorio";
-  if (!dni?.trim()) return { ok: false, error: "Indicá el DNI del paciente." };
 
-  // Already in the system → DNI is enough, just link to this org.
-  const existing = await getPatientByDni(dni);
-  if (existing) {
-    await joinPatientOrg(existing.id, orgId);
-    await ensurePatientLogin({
-      patientId: existing.id,
-      name: existing.fullName,
-      email: existing.email,
-      dni: existing.dni,
-      phone: existing.phone,
-    });
-    return {
-      ok: true,
-      patientId: existing.id,
-      alreadyExisted: true,
-      message: `${existing.fullName} (DNI ${existing.dni}) ya estaba en el sistema; lo/la sumé a ${orgName}.`,
-    };
-  }
+  const result = await resolveOrCreatePatient(
+    { dni, fullName, dateOfBirth, coverage, phone, email, notes: reason },
+    orgId,
+  );
+  if (!result.ok) return { ok: false, error: result.error };
 
-  // New patient → full data required.
-  const mail = (email ?? "").trim().toLowerCase();
-  if (!fullName?.trim() || !dateOfBirth?.trim() || !coverage?.trim()) {
-    return { ok: false, error: "Paciente nuevo: pedí nombre, fecha de nacimiento (AAAA-MM-DD) y cobertura." };
-  }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
-    return { ok: false, error: "Pedí un email válido: es lo que usa el paciente para recuperar su PIN." };
-  }
-  if ((phone ?? "").replace(/\D/g, "").length < 8) {
-    return { ok: false, error: "Pedí un teléfono válido para el paciente." };
-  }
-
-  const patient = await createPatient({
-    fullName,
-    dni,
-    dateOfBirth,
-    coverage,
-    phone,
-    email: mail,
-    notes: reason,
-  });
-  await joinPatientOrg(patient.id, orgId);
-  await ensurePatientLogin({ patientId: patient.id, name: fullName, email: mail, dni, phone: phone! });
+  const { patient, alreadyExisted } = result;
   return {
     ok: true,
     patientId: patient.id,
+    alreadyExisted,
     fullName: patient.fullName,
     dni: patient.dni,
-    message: `Paciente dado de alta en ${orgName}. Ya puede entrar: con su DNI o email y "Olvidé mi PIN" elige su PIN.`,
+    message: alreadyExisted
+      ? `${patient.fullName} (DNI ${patient.dni}) ya estaba en el sistema; lo/la sumé a ${orgName}.`
+      : `Paciente dado de alta en ${orgName}. Ya puede entrar: con su DNI o email y "Olvidé mi PIN" elige su PIN.`,
   };
 }
 
